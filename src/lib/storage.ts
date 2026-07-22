@@ -80,3 +80,111 @@ export function dualSet<T>(key: string, value: T): void {
   lsSet(key, value);   // 同步写 localStorage（快速回退）
   idbSet(key, value);  // 异步写 IndexedDB（大容量主存储）
 }
+
+// 删除单个键：IndexedDB + localStorage
+export async function dualDelete(key: string): Promise<void> {
+  try {
+    window.localStorage.removeItem(key);
+  } catch (error) {
+    console.warn(`localStorage 删除失败：${key}`, error);
+  }
+  try {
+    const db = await openDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const req = store.delete(key);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  } catch (error) {
+    console.warn(`IndexedDB 删除失败：${key}`, error);
+  }
+}
+
+// 清空全部本机创作数据（IndexedDB store + 相关 localStorage）
+export async function dualClearAll(options?: { keepSettings?: boolean }): Promise<void> {
+  const keepSettings = options?.keepSettings ?? false;
+  const keepKeys = new Set(
+    keepSettings
+      ? ['ai_novel_settings', 'ai_novel_mode']
+      : []
+  );
+
+  // localStorage：删掉 ai_novel_* 与其它已知前缀
+  try {
+    const toRemove: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (!k) continue;
+      if (keepKeys.has(k)) continue;
+      if (
+        k.startsWith('ai_novel_') ||
+        k.startsWith('free_key_') ||
+        k === 'failedKeys' ||
+        k === 'currentKeyIndex'
+      ) {
+        toRemove.push(k);
+      }
+    }
+    toRemove.forEach(k => window.localStorage.removeItem(k));
+    if (!keepSettings) {
+      // 完全重置时额外 clear 一遍，避免遗漏
+      // 但若 keepSettings 为 true 则不能 clear
+    } else {
+      // keep settings: already selective
+    }
+  } catch (error) {
+    console.warn('localStorage 清理失败', error);
+  }
+
+  if (!keepSettings) {
+    try {
+      window.localStorage.clear();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // IndexedDB：清空 store 或选择性删除
+  try {
+    const db = await openDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      if (!keepSettings) {
+        const req = store.clear();
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error);
+      } else {
+        const req = store.getAllKeys();
+        req.onsuccess = () => {
+          const keys = (req.result as IDBValidKey[]) || [];
+          let pending = keys.length;
+          if (pending === 0) {
+            resolve();
+            return;
+          }
+          keys.forEach(key => {
+            const keyStr = String(key);
+            if (keepKeys.has(keyStr)) {
+              pending -= 1;
+              if (pending === 0) resolve();
+              return;
+            }
+            const del = store.delete(key);
+            del.onsuccess = () => {
+              pending -= 1;
+              if (pending === 0) resolve();
+            };
+            del.onerror = () => reject(del.error);
+          });
+        };
+        req.onerror = () => reject(req.error);
+      }
+    });
+  } catch (error) {
+    console.warn('IndexedDB 清空失败', error);
+  }
+}
+

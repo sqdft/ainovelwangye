@@ -105,8 +105,43 @@ function validateCharacters(data: any): Character[] {
   return characters;
 }
 
-function validateTOC(data: any, startIndex: number, endIndex: number, existingTitles: string[], targetChapterCount = endIndex): TOCItem[] {
+function normalizeSummaryKey(text: string): string {
+  return (text || '')
+    .toLowerCase()
+    .replace(/[\s\u3000，。！？、；：""''（）()【】\[\]《》…—\-_,.!?;:'"]+/g, '')
+    .slice(0, 100);
+}
+
+function summaryTooSimilar(a: string, b: string): boolean {
+  const sa = normalizeSummaryKey(a);
+  const sb = normalizeSummaryKey(b);
+  if (!sa || !sb) return false;
+  if (sa === sb) return true;
+  if (sa.includes(sb) || sb.includes(sa)) return true;
+  // bigram overlap
+  const gram = (s: string) => {
+    const set = new Set<string>();
+    for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2));
+    return set;
+  };
+  const A = gram(sa);
+  const B = gram(sb);
+  if (A.size === 0 || B.size === 0) return false;
+  let inter = 0;
+  A.forEach(x => { if (B.has(x)) inter += 1; });
+  return inter / Math.max(A.size, B.size) >= 0.55;
+}
+
+function validateTOC(
+  data: any,
+  startIndex: number,
+  endIndex: number,
+  existingTitles: string[],
+  targetChapterCount = endIndex,
+  existingSummaries: string[] = []
+): TOCItem[] {
   const titleSet = new Set(existingTitles.map(title => title.trim()));
+  const summaryPool = existingSummaries.map(s => cleanText(s)).filter(Boolean);
   const byChapter = new Map<number, TOCItem>();
   const invalidTitleIssues: string[] = [];
 
@@ -116,6 +151,7 @@ function validateTOC(data: any, startIndex: number, endIndex: number, existingTi
     const summary = cleanText(item?.summary);
     if (!Number.isInteger(chapterNumber) || chapterNumber < startIndex || chapterNumber > endIndex) return;
     if (!title || !summary || titleSet.has(title)) return;
+    if (summaryPool.some(prev => summaryTooSimilar(summary, prev))) return;
     const endingTitleIssue = getEndingTitleIssue(title, chapterNumber, targetChapterCount);
     if (endingTitleIssue) {
       invalidTitleIssues.push(endingTitleIssue);
@@ -124,6 +160,7 @@ function validateTOC(data: any, startIndex: number, endIndex: number, existingTi
     if (!byChapter.has(chapterNumber)) {
       byChapter.set(chapterNumber, { chapterNumber, title, summary });
       titleSet.add(title);
+      summaryPool.push(summary);
     }
   });
 
@@ -506,7 +543,11 @@ export async function generateRealms(bookInfo: BookInfo, characters: Character[]
   const protagonistName = protagonist?.name || '主角';
   const themePrompts = bookInfo.themes.map(theme => getThemePrompt(theme, 'novel')).join('\n');
 
-  const prompt = `根据以下小说设定，生成一套完整的修炼/力量境界体系。
+  const themesJoined = (bookInfo.themes || []).join(' ');
+  const isCultivation = /玄幻|修仙|仙侠|高武|洪荒|灵气|武道|武侠|奇幻/.test(themesJoined);
+  const isUrban = /都市|言情|悬疑|推理|规则怪谈|职场|校园|甜宠|霸总|年代|种田|美食|综艺|现实/.test(themesJoined);
+  const systemKind = isCultivation ? '修炼/力量境界体系' : (isUrban ? '世界规则 / 身份阶层 / 组织权限 / 怪谈规则体系（不要硬套修仙境界）' : '力量等级或世界规则体系');
+  const prompt = `根据以下小说设定，生成一套完整的${systemKind}。
 
 【书籍信息】
 书名：${bookInfo.title}
@@ -516,7 +557,7 @@ ${themePrompts}
 主角：${protagonistName}
 
 要求：
-1. 大境界数量：8-12个，从低到高排列。
+1. 大阶数量：8-12个从低到高排列（都市/悬疑题材可用 5-8 阶身份/组织/规则层级）。
 2. 每个大境界包含小境界，必须符合网文惯例，只允许以下两种风格（全书统一选一种）：
    - 重数制：一重、二重、三重、四重、五重、六重、七重、八重、九重（共9个小境界，适合修仙/玄幻）
    - 三层制：初期、中期、后期（共3个小境界，适合都市/异能/简洁体系）
@@ -543,10 +584,21 @@ ${themePrompts}
   return validateRealms(data);
 }
 
-export async function generateTOC(bookInfo: BookInfo, characters: Character[], settings: Settings, startIndex: number, batchSize: number, existingTitles: string[] = []): Promise<TOCItem[]> {
+export async function generateTOC(
+  bookInfo: BookInfo,
+  characters: Character[],
+  settings: Settings,
+  startIndex: number,
+  batchSize: number = 20,
+  existingTitles: string[] = [],
+  existingSummaries: string[] = []
+): Promise<TOCItem[]> {
   const charsStr = characters.map(c => `- ${c.name} (${c.role}): ${c.description}`).join('\n');
   const endIndex = Math.min(startIndex + batchSize - 1, bookInfo.targetChapterCount);
   
+  const existingSummariesStr = existingSummaries.length > 0
+    ? `\n【已有章节剧情摘要（禁止复述相近推进）】\n${existingSummaries.slice(-40).map((s, i) => `${i + 1}. ${s.slice(0, 80)}`).join('\n')}`
+    : '';
   const existingTitlesStr = existingTitles.length > 0 
     ? `\n【已生成的章节标题（请务必避免重复）】\n${existingTitles.join(' | ')}\n` 
     : '';
@@ -583,7 +635,7 @@ export async function generateTOC(bookInfo: BookInfo, characters: Character[], s
 ${themePrompts}
 大纲：${bookInfo.outline}
 【主要人物】
-${charsStr}${existingTitlesStr}
+${charsStr}${existingTitlesStr}${existingSummariesStr}
 ${pacingInstruction}
 
 【章节标题节奏硬性规则】
@@ -594,12 +646,12 @@ ${pacingInstruction}
 请严格以 JSON 格式返回一个对象，包含一个 \`chapters\` 字段，其值为数组。数组中每个对象包含以下字段：
 - chapterNumber (数字): 章节序号（必须从 ${startIndex} 到 ${endIndex}）
 - title (字符串): 章节标题（必须新颖，绝对不能与已生成的章节标题重复）
-- summary (字符串): 本章详细剧情摘要（约100-150字，请务必保持高质量、逻辑严密和剧情连贯性，不要因为批量生成而降低质量）
+- summary (字符串): 本章详细剧情摘要（约100-150字，必须推进新事件，禁止与已有章节摘要高度相似或复述同一线索）
 不要输出其他任何解释性文字。`;
 
   const responseText = await callAI(prompt, settings, true);
   const data = extractJSON(responseText);
-  return validateTOC(data, startIndex, endIndex, existingTitles, bookInfo.targetChapterCount);
+  return validateTOC(data, startIndex, endIndex, existingTitles, bookInfo.targetChapterCount, existingSummaries);
 }
 
 export async function generateChapterContent(
@@ -850,22 +902,29 @@ export async function generateShortStoryContent(
   info: ShortStoryInfo,
   existingContent: string,
   settings: Settings,
-  isFinalBatch: boolean = false
+  isFinalBatch: boolean = false,
+  segmentIndex?: number
 ): Promise<string> {
   // 构建当前要写的分段说明
-  const totalSegments = info.segments?.length || 1;
-  const currentBatch = info.currentSegment || 0;
-  const segmentsInfo = info.segments?.map((s, i) => 
-    `第${i+1}段：${s.title}（约${s.wordCount}字）- ${s.summary}${s.isGenerated ? ' [已生成]' : ''}`
+  const segments = info.segments || [];
+  const totalSegments = segments.length || 1;
+  const currentBatch = typeof segmentIndex === 'number' ? segmentIndex : (info.currentSegment || 0);
+  const currentSeg = segments[currentBatch];
+  const segmentsInfo = segments.map((s, i) => 
+    `第${i+1}段：${s.title}（约${s.wordCount}字）- ${s.summary}${s.isGenerated ? ' [已生成]' : ''}${i === currentBatch ? ' 【当前要写】' : ''}`
   ).join('\n') || '';
   
-  // 计算分批字数（分两批，每批约一半）
+  // 按分段字数；无分段时回退两批
   const targetTotal = info.targetWordCount || 10000;
-  const batchWordCount = Math.round(targetTotal / 2); // 每批约一半字数
+  const batchWordCount = currentSeg?.wordCount
+    ? currentSeg.wordCount
+    : Math.round(targetTotal / Math.max(totalSegments, 2));
   
   const endingInstruction = isFinalBatch 
-    ? `【最后一批：目标约${batchWordCount}字】必须写到真正大结局！所有线索收束，主角目标达成或失败，用具体动作/对话收尾，禁止悬念钩子！` 
-    : `【第一批：目标约${batchWordCount}字】从开头写到剧情中段高潮前，充分展开细节，在合适的剧情节点暂停，不用收尾。`;
+    ? `【最后一段/收尾：目标约${batchWordCount}字】必须写到真正大结局！所有线索收束，主角目标达成或失败，用具体动作/对话收尾，禁止悬念钩子！` 
+    : (currentSeg
+      ? `【当前段：${currentSeg.title} · 目标约${batchWordCount}字】只写本段内容：${currentSeg.summary}。充分展开细节，在本段结束处自然停下，不要提前写后续段。`
+      : `【本批：目标约${batchWordCount}字】推进剧情，充分展开细节，在合适的剧情节点暂停，不用收尾。`);
 
   const themePrompts = info.themes.map(theme => getThemePrompt(theme, 'shortStory')).join('\n');
   let prompt = `你是一位专业短篇小说作家。撰写短篇故事。
@@ -873,20 +932,20 @@ export async function generateShortStoryContent(
 【故事设定】
 标题：${info.title}
 ${themePrompts}
-目标总字数：约${targetTotal}字（分两批生成，每批约${batchWordCount}字）
+目标总字数：约${targetTotal}字（按分段逐段生成，本段约${batchWordCount}字）
 核心脑洞/大纲：${info.outline}
 
-【分段规划】（共${totalSegments}段，当前第${currentBatch+1}批生成）
+【分段规划】（共${totalSegments}段，当前第${currentBatch+1}段）
 ${segmentsInfo}
 
 ${endingInstruction}
 
 【要求】
-1. 本批目标严格控制在${batchWordCount}字左右（误差不超过±10%），严禁超写！
+1. 本段目标严格控制在${batchWordCount}字左右（误差不超过±15%），严禁超写到下一段！
 2. 直接输出正文，不要标题/问候/总结/解释。
-3. ${isFinalBatch ? '这是最后一批，必须写完真正大结局，所有伏笔回收，用具体动作/对话收尾！' : '本批是前半部分，写到剧情中段即可，在合适节点暂停，不用收尾。'}
+3. ${isFinalBatch ? '这是最后一段，必须写完真正大结局，所有伏笔回收，用具体动作/对话收尾！' : '只完成本段，不要写结局（除非本段本身就是结局）。'}
 4. 写作风格自然流畅，可以包含任何符合剧情需要的内容，不受限制。
-${isFinalBatch ? '\n【强制结尾要求】这是最后一批生成！必须：1)所有核心冲突解决 2)主角目标达成或明确失败 3)所有伏笔回收 4)用具体动作/对话收尾 5)禁止"真正风暴才刚开始"等万能句 6)禁止"风卷起纸页慢慢翻开"等悬念钩子！' : ''}
+${isFinalBatch ? '\n【强制结尾要求】这是最后一段生成！必须：1)所有核心冲突解决 2)主角目标达成或明确失败 3)所有伏笔回收 4)用具体动作/对话收尾 5)禁止\"真正风暴才刚开始\"等万能句 6)禁止\"风卷起纸页慢慢翻开\"等悬念钩子！' : ''}
 `
 
   if (existingContent) {
