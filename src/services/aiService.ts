@@ -1,6 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { Settings, BookInfo, Character, TOCItem, ShortStoryInfo, StorySegment, Realm, SubRealm, RealmProgress, NovelMemory } from "../types";
 import { getThemePrompt } from "../config/themes";
+import { normalizeBaseUrl, proxyFetch } from '../lib/devProxy';
 
 function extractJSON(text: string): any {
   // 提取JSON文本
@@ -205,7 +206,7 @@ async function callOpenAIWithKey(
   }
 
   try {
-    const res = await fetch(`${settings.baseUrl}/chat/completions`, {
+    const res = await proxyFetch(`${normalizeBaseUrl(settings.baseUrl)}/chat/completions`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body)

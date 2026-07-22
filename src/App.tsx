@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
-import { BookOpen, Settings as SettingsIcon, Users, List, FileText, Download, Loader2, Wand2, Play, Feather, RefreshCw, Globe, Upload } from 'lucide-react';
+import { BookOpen, Settings as SettingsIcon, Users, List, FileText, Download, Loader2, Wand2, Play, Feather, RefreshCw, Globe, Upload, MoreHorizontal, ChevronDown, Eye, Pencil, LayoutList, Rows3, Search } from 'lucide-react';
 import { Settings, BookInfo, Character, TOCItem, Provider, ShortStoryInfo, Realm, SubRealm, RealmProgress, ModelInfo, NovelMemory } from './types';
 import { dualGet, dualSet } from './lib/storage';
+import { normalizeBaseUrl, proxyFetch } from './lib/devProxy';
 import { generateBookInfo, generateCharacters, generateRealms, generateTOC, generateChapterContent, generateShortStoryContent, generateShortStoryTitles, generateShortStoryOutlineFromTitle, generateShortStorySegments, generateBookTitles, updateNovelMemory } from './services/aiService';
 import { PROVIDERS, getProviderConfig } from './config/providers';
 import { MALE_THEME_NAMES, FEMALE_THEME_NAMES, SHORT_STORY_THEME_NAMES } from './config/themes';
@@ -57,13 +58,18 @@ const ThemeSelector = ({
 }) => {
   const [gender, setGender] = useState<'male' | 'female'>('male');
   const [showAll, setShowAll] = useState(false);
+  const [themeQuery, setThemeQuery] = useState('');
   
   // 防御性检查：确保 selectedThemes 是数组
   const safeSelectedThemes = Array.isArray(selectedThemes) ? selectedThemes : [];
   const availableThemes = type === 'shortStory' ? SHORT_STORY_THEME_NAMES : (gender === 'male' ? MALE_THEME_NAMES : FEMALE_THEME_NAMES);
   // 防御性检查：确保 availableThemes 是数组
   const safeAvailableThemes = Array.isArray(availableThemes) ? availableThemes : [];
-  const displayThemes = showAll ? safeAvailableThemes : safeAvailableThemes.slice(0, 15);
+  const q = themeQuery.trim().toLowerCase();
+  const filteredThemes = q
+    ? safeAvailableThemes.filter((t) => t.toLowerCase().includes(q))
+    : safeAvailableThemes;
+  const displayThemes = q || showAll ? filteredThemes : filteredThemes.slice(0, 15);
 
   // 当切换男女频时，清空已选主题
   const handleGenderChange = (newGender: 'male' | 'female') => {
@@ -80,7 +86,7 @@ const ThemeSelector = ({
             className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
               gender === 'male'
                 ? 'bg-blue-100 text-blue-700 border border-blue-200'
-                : 'bg-zinc-50 text-zinc-600 border border-zinc-200 hover:bg-zinc-100'
+                : 'bg-stone-50 text-stone-600 border border-stone-200 hover:bg-stone-100'
             }`}
           >
             男频
@@ -90,32 +96,48 @@ const ThemeSelector = ({
             className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
               gender === 'female'
                 ? 'bg-pink-100 text-pink-700 border border-pink-200'
-                : 'bg-zinc-50 text-zinc-600 border border-zinc-200 hover:bg-zinc-100'
+                : 'bg-stone-50 text-stone-600 border border-stone-200 hover:bg-stone-100'
             }`}
           >
             女频
           </button>
-          <span className="text-xs text-zinc-400 ml-2">
+          <span className="text-xs text-[var(--ui-muted)] ml-2">
             已选 {safeSelectedThemes.length}/5 个主题
           </span>
         </div>
       )}
       
-      <div className="flex items-center justify-between mb-2">
-        <label className="block text-sm font-medium text-zinc-700">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
+        <label className="block text-sm font-medium text-stone-700">
           主题 {type === 'shortStory' && '(可多选，最多5个)'}
+          <span className="ml-2 text-xs font-normal text-[var(--ui-muted)]">
+            {q ? `匹配 ${filteredThemes.length}` : `共 ${safeAvailableThemes.length}`} 个
+          </span>
         </label>
-        {safeAvailableThemes.length > 15 && (
-          <button 
-            onClick={() => setShowAll(!showAll)}
-            className="text-xs text-indigo-600 hover:text-indigo-700 font-medium"
-          >
-            {showAll ? '收起' : '展示全部'}
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 text-[var(--ui-muted)] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="search"
+              value={themeQuery}
+              onChange={(e) => setThemeQuery(e.target.value)}
+              placeholder="搜索主题…"
+              className="ui-input !py-1.5 !pl-8 !pr-2 text-xs w-40 sm:w-48"
+            />
+          </div>
+          {!q && safeAvailableThemes.length > 15 && (
+            <button
+              type="button"
+              onClick={() => setShowAll(!showAll)}
+              className="text-xs text-[var(--ui-accent-text)] hover:text-[var(--ui-accent-text)] font-medium whitespace-nowrap"
+            >
+              {showAll ? '收起' : '展示全部'}
+            </button>
+          )}
+        </div>
       </div>
       
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-2 max-h-48 overflow-y-auto p-0.5">
         {displayThemes.map(theme => {
           const isSelected = safeSelectedThemes.includes(theme);
           return (
@@ -133,8 +155,8 @@ const ThemeSelector = ({
                 isSelected 
                   ? gender === 'female' && type !== 'shortStory'
                     ? 'bg-pink-100 text-pink-700 border border-pink-200'
-                    : 'bg-indigo-100 text-indigo-700 border border-indigo-200'
-                  : 'bg-zinc-50 text-zinc-600 border border-zinc-200 hover:bg-zinc-100'
+                    : 'bg-[var(--ui-accent-soft)] text-[var(--ui-accent-text)] border border-[rgba(196,92,38,0.35)]'
+                  : 'bg-stone-50 text-stone-600 border border-stone-200 hover:bg-stone-100'
               }`}
             >
               {theme}
@@ -142,17 +164,22 @@ const ThemeSelector = ({
           );
         })}
       </div>
+      {displayThemes.length === 0 && (
+        <p className="text-xs text-[var(--ui-muted)] py-3 text-center border border-dashed border-stone-200 rounded-lg mt-1">
+          没有匹配「{themeQuery}」的主题，换个关键词试试（主题表未删减）
+        </p>
+      )}
       
       {safeSelectedThemes.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-2">
-          <span className="text-xs text-zinc-500">已选:</span>
+          <span className="text-xs text-[var(--ui-muted)]">已选:</span>
           {safeSelectedThemes.map(theme => (
             <span 
               key={theme} 
               className={`px-2 py-0.5 rounded text-xs ${
                 gender === 'female' && type !== 'shortStory'
                   ? 'bg-pink-50 text-pink-700'
-                  : 'bg-indigo-50 text-indigo-700'
+                  : 'bg-[var(--ui-accent-soft)] text-[var(--ui-accent-text)]'
               }`}
             >
               {theme}
@@ -178,6 +205,11 @@ export default function App() {
   const [isBatchGenerating, setIsBatchGenerating] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [showDownloadMenu, setShowDownloadMenu] = useState(false);
+  const [showSponsor, setShowSponsor] = useState(false);
+  const [tocCompact, setTocCompact] = useState(true);
+  const [tocMenuOpen, setTocMenuOpen] = useState<number | null>(null);
+  const [chapterReadMode, setChapterReadMode] = useState(true);
+  const [showShortResetMenu, setShowShortResetMenu] = useState(false);
   const stopBatchRef = useRef(false);
 
   // Settings State
@@ -312,7 +344,8 @@ export default function App() {
         headers['Authorization'] = `Bearer ${apiKey}`;
       }
 
-      const res = await fetch(`${settings.baseUrl}/models`, {
+      const modelsUrl = `${normalizeBaseUrl(settings.baseUrl)}/models`;
+      const res = await proxyFetch(modelsUrl, {
         method: 'GET',
         headers
       });
@@ -1121,15 +1154,25 @@ export default function App() {
   // Renderers
   const renderSettings = () => (
     <div className="max-w-2xl mx-auto space-y-6">
-      <div className="bg-white p-6 rounded-2xl shadow-sm border border-zinc-100">
-        <h2 className="text-xl font-semibold text-zinc-900 mb-6">API & 模型设置</h2>
+      <div className="ui-card p-6">
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-6">
+          <div>
+            <p className="text-xs font-semibold tracking-[.16em] uppercase text-[var(--ui-accent-text)]">写作引擎</p>
+            <h2 className="text-xl font-semibold text-[var(--ui-ink)] mt-1">API & 模型设置</h2>
+            <p className="text-sm text-[var(--ui-muted)] mt-1">配置会自动保存到本机，开始写作前可先检测可用模型。</p>
+          </div>
+          <span className="ui-status-pill self-start">
+            <span className="w-1.5 h-1.5 rounded-full bg-[var(--ui-success)]" />
+            已自动保存
+          </span>
+        </div>
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-zinc-700 mb-1">AI 供应商</label>
+            <label className="block text-sm font-medium text-stone-700 mb-1">AI 供应商</label>
             <select 
               value={settings.provider}
               onChange={(e) => handleProviderChange(e.target.value as Provider)}
-              className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+              className="w-full ui-input"
             >
               {Object.entries(PROVIDERS).map(([key, { label }]) => (
                 <option key={key} value={key}>{label}</option>
@@ -1139,26 +1182,26 @@ export default function App() {
 
           {settings.provider !== 'gemini' && (
             <div>
-              <label className="block text-sm font-medium text-zinc-700 mb-1">Base URL</label>
+              <label className="block text-sm font-medium text-stone-700 mb-1">Base URL</label>
               <input 
                 type="text" 
                 value={settings.baseUrl || ''}
                 onChange={(e) => setSettings({...settings, baseUrl: e.target.value})}
-                className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                className="w-full ui-input"
               />
             </div>
           )}
 
           <div>
             <div className="flex justify-between items-center mb-1">
-              <label className="block text-sm font-medium text-zinc-700">
+              <label className="block text-sm font-medium text-stone-700">
                 {settings.provider === 'free' ? 'API Keys (轮询)' : 'API Key'}
               </label>
               <a 
                 href="https://pan.quark.cn/s/12ccdf62ccd8" 
                 target="_blank" 
                 rel="noopener noreferrer"
-                className="text-xs text-indigo-600 hover:text-indigo-700 font-medium"
+                className="text-xs text-[var(--ui-accent-text)] hover:text-[var(--ui-accent-text)] font-medium"
               >
                 获取免费 Token
               </a>
@@ -1168,7 +1211,7 @@ export default function App() {
               // 免费提供商：多密钥输入
               <div className="space-y-2">
                 {(!settings.apiKeys || settings.apiKeys.length === 0) ? (
-                  <div className="text-sm text-zinc-500 italic">点击下方按钮添加密钥，支持添加多个密钥自动轮询</div>
+                  <div className="text-sm text-[var(--ui-muted)] italic">点击下方按钮添加密钥，支持添加多个密钥自动轮询</div>
                 ) : (
                   settings.apiKeys.map((key, index) => (
                     <div key={index} className="flex gap-2">
@@ -1181,7 +1224,7 @@ export default function App() {
                           setSettings({...settings, apiKeys: newKeys});
                         }}
                         placeholder={`密钥 ${index + 1}`}
-                        className="flex-1 px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                        className="flex-1 ui-input"
                       />
                       <button
                         onClick={() => {
@@ -1197,11 +1240,11 @@ export default function App() {
                 )}
                 <button
                   onClick={() => setSettings({...settings, apiKeys: [...(settings.apiKeys || []), '']})}
-                  className="w-full py-2 text-sm text-indigo-600 bg-indigo-50 border border-indigo-100 rounded-lg hover:bg-indigo-100 transition-colors"
+                  className="ui-btn-secondary w-full"
                 >
                   + 添加密钥
                 </button>
-                <p className="text-xs text-zinc-500">
+                <p className="text-xs text-[var(--ui-muted)]">
                   已添加 {settings.apiKeys?.length || 0} 个密钥，系统会自动轮询使用。当某个密钥过期时会自动切换到下一个。
                 </p>
               </div>
@@ -1213,10 +1256,10 @@ export default function App() {
                   value={settings.apiKey}
                   onChange={(e) => setSettings({...settings, apiKey: e.target.value})}
                   placeholder={settings.provider === 'gemini' ? "留空则使用系统默认 Key" : "sk-..."}
-                  className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                  className="w-full ui-input"
                 />
                 {settings.provider === 'gemini' && !settings.apiKey && (
-                  <p className="text-xs text-zinc-500 mt-1">当前正在使用 AI Studio 平台自动注入的安全密钥。</p>
+                  <p className="text-xs text-[var(--ui-muted)] mt-1">当前正在使用 AI Studio 平台自动注入的安全密钥。</p>
                 )}
               </>
             )}
@@ -1224,12 +1267,12 @@ export default function App() {
 
           <div>
             <div className="flex justify-between items-center mb-1">
-              <label className="block text-sm font-medium text-zinc-700">模型名称</label>
+              <label className="block text-sm font-medium text-stone-700">模型名称</label>
               {settings.provider !== 'gemini' && (
                 <button
                   onClick={handleDetectModels}
                   disabled={isGenerating}
-                  className="text-xs text-indigo-600 hover:text-indigo-700 flex items-center gap-1 disabled:opacity-50"
+                  className="ui-btn-ghost text-xs disabled:opacity-50"
                 >
                   {isGenerating ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
                   检测可用模型
@@ -1240,7 +1283,7 @@ export default function App() {
               <select
                 value={settings.model}
                 onChange={(e) => setSettings({...settings, model: e.target.value})}
-                className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                className="w-full ui-input"
               >
                 {settings.availableModels.map((model) => (
                   <option key={model.id} value={model.id}>
@@ -1254,37 +1297,37 @@ export default function App() {
                 type="text"
                 value={settings.model || ''}
                 onChange={(e) => setSettings({...settings, model: e.target.value})}
-                className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                className="w-full ui-input"
               />
             )}
             {settings.availableModels && settings.availableModels.length > 0 && (
-              <p className="text-xs text-zinc-500 mt-1">检测到 {settings.availableModels.length} 个可用模型</p>
+              <p className="text-xs text-[var(--ui-muted)] mt-1">检测到 {settings.availableModels.length} 个可用模型</p>
             )}
           </div>
         </div>
       </div>
 
       {mode === 'novel' && (
-        <div className="bg-white p-6 rounded-2xl shadow-sm border border-zinc-100">
-          <h2 className="text-xl font-semibold text-zinc-900 mb-6">生成偏好 (长篇小说)</h2>
+        <div className="ui-card p-6">
+          <h2 className="text-xl font-semibold text-[var(--ui-ink)] mb-6">生成偏好 (长篇小说)</h2>
           <div className="space-y-6">
             <div>
-              <label className="block text-sm font-medium text-zinc-700 mb-1">每章最低字数</label>
+              <label className="block text-sm font-medium text-stone-700 mb-1">每章最低字数</label>
               <input 
                 type="number" 
                 value={settings.minWordCount || 2000}
                 onChange={(e) => setSettings({...settings, minWordCount: parseInt(e.target.value) || 2000})}
                 min={500}
                 step={500}
-                className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                className="w-full ui-input"
               />
-              <p className="text-xs text-zinc-500 mt-1">AI 会尽量满足此字数要求，建议设置在 1000 - 3000 之间。</p>
+              <p className="text-xs text-[var(--ui-muted)] mt-1">AI 会尽量满足此字数要求，建议设置在 1000 - 3000 之间。</p>
             </div>
             
             <div>
               <div className="flex justify-between items-center mb-2">
-                <label className="block text-sm font-medium text-zinc-700">创作自由度 (Temperature)</label>
-                <span className="text-sm font-semibold text-indigo-600">{(settings.temperature ?? 0.9).toFixed(1)}</span>
+                <label className="block text-sm font-medium text-stone-700">创作自由度 (Temperature)</label>
+                <span className="text-sm font-semibold text-[var(--ui-accent-text)]">{(settings.temperature ?? 0.9).toFixed(1)}</span>
               </div>
               <input 
                 type="range" 
@@ -1293,14 +1336,14 @@ export default function App() {
                 min={0}
                 max={2}
                 step={0.1}
-                className="w-full h-2 bg-zinc-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                className="w-full h-2 bg-stone-200 rounded-lg appearance-none cursor-pointer accent-[var(--ui-accent)]"
               />
-              <div className="flex justify-between text-xs text-zinc-500 mt-1">
+              <div className="flex justify-between text-xs text-[var(--ui-muted)] mt-1">
                 <span>0.0 (保守)</span>
                 <span>1.0 (平衡)</span>
                 <span>2.0 (激进)</span>
               </div>
-              <p className="text-xs text-zinc-500 mt-2">
+              <p className="text-xs text-[var(--ui-muted)] mt-2">
                 <span className="font-medium">说明：</span>
                 {(settings.temperature ?? 0.9) < 0.5 && '保守模式，内容更规范但可能缺乏创意'}
                 {(settings.temperature ?? 0.9) >= 0.5 && (settings.temperature ?? 0.9) < 1.2 && '平衡模式，适合大多数创作场景'}
@@ -1311,21 +1354,33 @@ export default function App() {
         </div>
       )}
 
-      <div className="p-6 rounded-2xl shadow-sm border border-pink-100/50 overflow-hidden relative" style={{ background: 'linear-gradient(135deg, #fce4ec, #f8bbd0, #fce4ec, #f3e5f5, #fce4ec)', backgroundSize: '400% 400%', animation: 'pinkFlow 8s ease infinite' }}>
-        <div className="text-center mb-5 relative z-10">
-          <h2 className="text-lg font-semibold text-zinc-800 mb-1">☕ 赞助支持</h2>
-          <p className="text-sm text-zinc-500">你的赞助是支持小羊老师创作的动力</p>
-        </div>
-        <div className="flex gap-5 justify-center relative z-10">
-          <div className="flex flex-col items-center gap-2 bg-white/80 backdrop-blur-sm p-3 rounded-xl shadow-sm border border-white/50">
-            <img src="/微信.png" alt="微信支付" className="w-32 h-32 rounded-lg" />
-            <span className="text-xs font-medium text-zinc-600 bg-green-50 text-green-700 px-2 py-0.5 rounded-full">微信</span>
+      <div className="ui-card overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setShowSponsor(v => !v)}
+          className="w-full flex items-center justify-between px-5 py-3.5 text-left hover:bg-stone-50/80 transition-colors"
+        >
+          <div>
+            <h2 className="text-sm font-semibold text-stone-800">赞助支持（可选）</h2>
+            <p className="text-xs text-[var(--ui-muted)] mt-0.5">折叠展示，不打扰创作</p>
           </div>
-          <div className="flex flex-col items-center gap-2 bg-white/80 backdrop-blur-sm p-3 rounded-xl shadow-sm border border-white/50">
-            <img src="/支付宝.png" alt="支付宝支付" className="w-32 h-32 rounded-lg" />
-            <span className="text-xs font-medium text-zinc-600 bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full">支付宝</span>
+          <ChevronDown className={`w-4 h-4 text-[var(--ui-muted)] transition-transform ${showSponsor ? 'rotate-180' : ''}`} />
+        </button>
+        {showSponsor && (
+          <div className="px-5 pb-5 border-t border-stone-100">
+            <p className="text-xs text-[var(--ui-muted)] text-center py-3">你的支持是小羊老师继续维护的动力</p>
+            <div className="flex gap-4 justify-center">
+              <div className="flex flex-col items-center gap-2 p-2.5 rounded-xl border border-stone-100 bg-stone-50/80">
+                <img src="/微信.png" alt="微信支付" className="w-28 h-28 rounded-lg" />
+                <span className="text-[11px] font-medium text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">微信</span>
+              </div>
+              <div className="flex flex-col items-center gap-2 p-2.5 rounded-xl border border-stone-100 bg-stone-50/80">
+                <img src="/支付宝.png" alt="支付宝支付" className="w-28 h-28 rounded-lg" />
+                <span className="text-[11px] font-medium text-sky-700 bg-sky-50 px-2 py-0.5 rounded-full">支付宝</span>
+              </div>
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
@@ -1335,10 +1390,10 @@ export default function App() {
       return (
         <div className="max-w-3xl mx-auto space-y-6">
           <div className="flex justify-between items-center mb-6">
-            <h2 className="text-2xl font-semibold text-zinc-900">短篇故事设定</h2>
+            <h2 className="text-2xl font-semibold text-[var(--ui-ink)]">短篇故事设定</h2>
           </div>
 
-          <div className="bg-white p-6 rounded-2xl shadow-sm border border-zinc-100 space-y-6">
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-stone-100 space-y-6">
             <ThemeSelector 
               type="shortStory"
               selectedThemes={shortStoryInfo.themes} 
@@ -1348,11 +1403,11 @@ export default function App() {
             <div className="grid grid-cols-2 gap-4">
               <div className="col-span-2 md:col-span-1">
                 <div className="flex justify-between items-center mb-1">
-                  <label className="block text-sm font-medium text-zinc-700">故事标题</label>
+                  <label className="block text-sm font-medium text-stone-700">故事标题</label>
                   <button
                     onClick={handleGenerateShortStoryTitles}
                     disabled={isGenerating || !shortStoryInfo.themes || shortStoryInfo.themes.length === 0}
-                    className="text-xs text-indigo-600 hover:text-indigo-700 flex items-center gap-1 disabled:opacity-50"
+                    className="ui-btn-ghost text-xs disabled:opacity-50"
                   >
                     {isGenerating && (!shortStoryTitleOptions || shortStoryTitleOptions.length === 0) ? <Loader2 className="w-3 h-3 animate-spin" /> : <Wand2 className="w-3 h-3" />}
                     AI 构思标题
@@ -1362,7 +1417,7 @@ export default function App() {
                   type="text" 
                   value={shortStoryInfo.title}
                   onChange={(e) => setShortStoryInfo({...shortStoryInfo, title: e.target.value})}
-                  className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                  className="w-full ui-input"
                 />
                 {shortStoryTitleOptions && shortStoryTitleOptions.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-2">
@@ -1370,7 +1425,7 @@ export default function App() {
                       <button
                         key={idx}
                         onClick={() => setShortStoryInfo({...shortStoryInfo, title: t})}
-                        className="px-2 py-1 text-xs bg-indigo-50 text-indigo-600 rounded hover:bg-indigo-100 transition-colors"
+                        className="px-2 py-1 text-xs bg-[var(--ui-accent-soft)] text-[var(--ui-accent-text)] rounded hover:bg-[var(--ui-accent-soft)] transition-colors"
                       >
                         {t}
                       </button>
@@ -1379,24 +1434,24 @@ export default function App() {
                 )}
               </div>
               <div className="col-span-2 md:col-span-1">
-                <label className="block text-sm font-medium text-zinc-700 mb-1">目标总字数 (7k-12k)</label>
+                <label className="block text-sm font-medium text-stone-700 mb-1">目标总字数 (7k-12k)</label>
                 <input 
                   type="number" 
                   value={shortStoryInfo.targetWordCount}
                   onChange={(e) => setShortStoryInfo({...shortStoryInfo, targetWordCount: parseInt(e.target.value) || 10000})}
                   min={1000}
                   step={1000}
-                  className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                  className="w-full ui-input"
                 />
               </div>
             </div>
             <div>
               <div className="flex justify-between items-center mb-1">
-                <label className="block text-sm font-medium text-zinc-700">核心脑洞 / 故事大纲</label>
+                <label className="block text-sm font-medium text-stone-700">核心脑洞 / 故事大纲</label>
                 <button
                   onClick={handleGenerateShortStoryOutline}
                   disabled={isGenerating || !shortStoryInfo.title}
-                  className="text-xs text-indigo-600 hover:text-indigo-700 flex items-center gap-1 disabled:opacity-50"
+                  className="ui-btn-ghost text-xs disabled:opacity-50"
                 >
                   {isGenerating && shortStoryInfo.title && !shortStoryInfo.outline ? <Loader2 className="w-3 h-3 animate-spin" /> : <Wand2 className="w-3 h-3" />}
                   AI 生成大纲
@@ -1406,7 +1461,7 @@ export default function App() {
                 value={shortStoryInfo.outline}
                 onChange={(e) => setShortStoryInfo({...shortStoryInfo, outline: e.target.value})}
                 placeholder="描述这个短篇故事的核心创意、主要情节和结局..."
-                className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 h-40 resize-none"
+                className="w-full ui-input"
               />
             </div>
           </div>
@@ -1417,18 +1472,22 @@ export default function App() {
     return (
       <div className="max-w-5xl mx-auto space-y-6">
         <div className="flex justify-between items-center mb-6">
-          <h2 className="text-2xl font-semibold text-zinc-900">书籍设定</h2>
+          <div>
+            <p className="text-xs font-semibold tracking-[.16em] uppercase text-[var(--ui-accent-text)]">第一步 · 故事种子</p>
+            <h2 className="text-2xl font-semibold text-[var(--ui-ink)] mt-1">书籍设定</h2>
+            <p className="text-sm text-[var(--ui-muted)] mt-1">从题材、篇幅与书名开始，为故事建立第一块骨架。</p>
+          </div>
           <button
             onClick={handleGenerateBookInfo}
             disabled={isGenerating || !bookInfo.isTitleSelected}
-            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-70 disabled:cursor-not-allowed shadow-sm"
+            className="ui-btn-primary disabled:opacity-70"
           >
             {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
             AI 生成大纲设定
           </button>
         </div>
 
-        <div className="bg-white p-8 rounded-2xl shadow-sm border border-zinc-100 space-y-6">
+        <div className="ui-card p-6 md:p-8 space-y-6">
           <ThemeSelector 
             selectedThemes={bookInfo.themes} 
             onChange={handleBookThemesChange}
@@ -1436,12 +1495,12 @@ export default function App() {
           
           <div className="grid grid-cols-2 gap-6">
             <div>
-              <label className="block text-sm font-medium text-zinc-700 mb-2">小说篇幅</label>
+              <label className="block text-sm font-medium text-stone-700 mb-2">小说篇幅</label>
               <div className="flex gap-2">
                 <select 
                   value={bookInfo.lengthType}
                   onChange={(e) => handleLengthChange(e.target.value)}
-                  className="flex-1 px-4 py-2.5 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                  className="flex-1 ui-input"
                 >
                   {LENGTHS.map(l => (
                     <option key={l.value} value={l.value}>{l.label}</option>
@@ -1455,21 +1514,21 @@ export default function App() {
                       max="10000"
                       value={bookInfo.targetChapterCount}
                       onChange={(e) => setBookInfo({ ...bookInfo, targetChapterCount: parseInt(e.target.value) || 1 })}
-                      className="w-full px-4 py-2.5 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                      className="w-full ui-input"
                       placeholder="章数"
                     />
-                    <span className="text-sm text-zinc-500">章</span>
+                    <span className="text-sm text-[var(--ui-muted)]">章</span>
                   </div>
                 )}
               </div>
             </div>
             <div>
               <div className="flex justify-between items-center mb-2">
-                <label className="block text-sm font-medium text-zinc-700">书名</label>
+                <label className="block text-sm font-medium text-stone-700">书名</label>
                 <button
                   onClick={handleGenerateBookTitles}
                   disabled={isGenerating || !bookInfo.themes || bookInfo.themes.length === 0}
-                  className="text-xs text-indigo-600 hover:text-indigo-700 flex items-center gap-1 disabled:opacity-50"
+                  className="ui-btn-ghost text-xs disabled:opacity-50"
                 >
                   {isGenerating && (!bookInfo.titleOptions || bookInfo.titleOptions.length === 0) ? <Loader2 className="w-3 h-3 animate-spin" /> : <Wand2 className="w-3 h-3" />}
                   AI 构思书名
@@ -1480,35 +1539,35 @@ export default function App() {
                 value={bookInfo.title}
                 onChange={(e) => handleBookTitleInput(e.target.value)}
                 placeholder="请先生成书名或手动输入"
-                className="w-full px-4 py-2.5 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                className="w-full ui-input"
               />
             </div>
           </div>
           
           {/* 书名卡片选择区域 - 选择后自动消失 */}
           {bookInfo.titleOptions && bookInfo.titleOptions.length > 0 && (
-            <div className="border-t border-zinc-100 pt-6 -mx-8 px-8">
-              <p className="text-sm text-zinc-600 mb-4 font-medium">📚 请选择一个书名（点击卡片）：</p>
+            <div className="border-t border-[var(--ui-line)] pt-6 -mx-8 px-8">
+              <p className="text-sm text-[var(--ui-muted)] mb-4 font-medium">从这些名字里，选择最像你故事的那一个：</p>
               <div className="grid grid-cols-1 gap-3">
                 {bookInfo.titleOptions.map((option, idx) => (
                   <button
                     key={idx}
                     onClick={() => handleSelectBookTitle(option.title)}
-                    className="text-left p-5 bg-gradient-to-r from-indigo-50 to-purple-50 hover:from-indigo-100 hover:to-purple-100 border border-indigo-200 rounded-xl transition-all hover:shadow-md group"
+                    className="ui-title-choice text-left p-5 group"
                   >
                     <div className="flex items-start gap-4">
-                      <div className="flex-shrink-0 w-10 h-10 bg-indigo-600 text-white rounded-lg flex items-center justify-center font-bold text-base group-hover:scale-110 transition-transform">
+                      <div className="flex-shrink-0 w-10 h-10 bg-[var(--ui-accent)] text-white rounded-lg flex items-center justify-center font-bold text-base group-hover:scale-110 transition-transform">
                         {idx + 1}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <h3 className="font-semibold text-zinc-900 text-base mb-1.5 group-hover:text-indigo-700 transition-colors">
+                        <h3 className="font-semibold text-[var(--ui-ink)] text-base mb-1.5 group-hover:text-[var(--ui-accent-text)] transition-colors">
                           《{option.title}》
                         </h3>
-                        <p className="text-sm text-zinc-600 leading-relaxed">
+                        <p className="text-sm text-stone-600 leading-relaxed">
                           {option.intro}
                         </p>
                       </div>
-                      <div className="flex-shrink-0 text-indigo-400 group-hover:text-indigo-600 transition-colors">
+                      <div className="flex-shrink-0 text-[var(--ui-accent)] group-hover:text-[var(--ui-accent-text)] transition-colors">
                         <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                         </svg>
@@ -1522,16 +1581,16 @@ export default function App() {
           
           {/* 已选择书名提示 */}
           {bookInfo.isTitleSelected && bookInfo.title && (
-            <div className="border-t border-zinc-100 pt-6">
-              <p className="text-sm text-green-600 flex items-center gap-2 mb-4">
-                <span className="w-2 h-2 bg-green-500 rounded-full"></span>
+            <div className="border-t border-stone-100 pt-6">
+              <p className="text-sm text-[var(--ui-success)] flex items-center gap-2 mb-4">
+                <span className="w-2 h-2 bg-[var(--ui-success)] rounded-full"></span>
                 已选择书名：《{bookInfo.title}》
               </p>
               
               {/* 境界体系开关 */}
-              <div className="flex items-center justify-between p-4 bg-amber-50 border border-amber-200 rounded-xl">
+              <div className="ui-realm-note flex items-center justify-between p-4">
                 <div className="flex-1">
-                  <label className="text-sm font-medium text-amber-900 flex items-center gap-2 cursor-pointer">
+                  <label className="text-sm font-medium text-[var(--ui-ink)] flex items-center gap-2 cursor-pointer">
                     <input
                       type="checkbox"
                       checked={bookInfo.enableRealms ?? true}
@@ -1542,11 +1601,11 @@ export default function App() {
                           setRealmProgress({ realms: [], protagonistCurrentRealmIndex: 0, protagonistCurrentSubRealmIndex: 0, chapterRealmMap: {} });
                         }
                       }}
-                      className="w-4 h-4 text-indigo-600 border-amber-300 rounded focus:ring-indigo-500"
+                      className="w-4 h-4 text-[var(--ui-accent-text)] border-amber-300 rounded focus:ring-[rgba(196,92,38,0.15)]"
                     />
                     启用境界体系
                   </label>
-                  <p className="text-xs text-amber-700 mt-1 ml-6">
+                  <p className="text-xs text-[var(--ui-muted)] mt-1 ml-6">
                     {bookInfo.enableRealms 
                       ? '适合修仙、玄幻、武侠等题材，会生成完整的力量等级体系' 
                       : '适合都市、现代、悬疑等题材，不生成境界划分'}
@@ -1559,32 +1618,32 @@ export default function App() {
           {/* 大纲和世界观 - 始终显示 */}
           <div className="space-y-6">
             <div>
-              <label className="block text-sm font-medium text-zinc-700 mb-2">故事大纲</label>
+              <label className="block text-sm font-medium text-stone-700 mb-2">故事大纲</label>
               <textarea 
                 value={bookInfo.outline}
                 onChange={(e) => handleBookPlanningFieldChange('outline', e.target.value)}
                 placeholder={bookInfo.isTitleSelected ? "点击右上角按钮生成，或手动填写..." : "请先选择书名后再填写大纲"}
                 disabled={!bookInfo.isTitleSelected}
-                className="w-full px-4 py-3 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 h-40 resize-none disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full ui-input"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-zinc-700 mb-2">世界观设定</label>
+              <label className="block text-sm font-medium text-stone-700 mb-2">世界观设定</label>
               <textarea 
                 value={bookInfo.worldbuilding}
                 onChange={(e) => handleBookPlanningFieldChange('worldbuilding', e.target.value)}
                 placeholder={bookInfo.isTitleSelected ? "点击右上角按钮生成，或手动填写..." : "请先选择书名后再填写世界观"}
                 disabled={!bookInfo.isTitleSelected}
-                className="w-full px-4 py-3 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 h-40 resize-none disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full ui-input"
               />
             </div>
           </div>
           
           {/* 引导提示 */}
           {!bookInfo.isTitleSelected && (
-            <div className="bg-amber-50 p-4 rounded-xl border border-amber-100">
-              <p className="text-sm text-amber-800">
-                💡 提示：请先选择主题和篇幅，然后点击"AI 构思书名"生成多个书名选项，选择您喜欢的书名后再继续生成大纲设定。
+            <div className="ui-seed-tip p-4">
+              <p className="text-sm text-[var(--ui-muted)]">
+                先选择主题和篇幅，再点击“AI 构思书名”。确定书名后，就可以继续生成大纲与世界观。
               </p>
             </div>
           )}
@@ -1596,11 +1655,11 @@ export default function App() {
   const renderCharacters = () => (
     <div className="max-w-4xl mx-auto space-y-6">
       <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-semibold text-zinc-900">人物关系</h2>
+        <h2 className="text-2xl font-semibold text-[var(--ui-ink)]">人物关系</h2>
         <div className="flex gap-2">
           <button
             onClick={handleAddCharacter}
-            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-zinc-700 bg-zinc-100 rounded-lg hover:bg-zinc-200 transition-colors"
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-stone-700 bg-stone-100 rounded-lg hover:bg-stone-200 transition-colors"
           >
             <Users className="w-4 h-4" />
             添加人物
@@ -1608,7 +1667,7 @@ export default function App() {
           <button
             onClick={handleGenerateCharacters}
             disabled={isGenerating || !bookInfo.title}
-            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-70 disabled:cursor-not-allowed shadow-sm"
+            className="ui-btn-primary disabled:opacity-70"
           >
             {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
             AI 生成人物
@@ -1617,21 +1676,21 @@ export default function App() {
       </div>
 
       {(!characters || characters.length === 0) ? (
-        <div className="text-center py-12 bg-white rounded-2xl border border-zinc-100 border-dashed">
-          <Users className="w-12 h-12 text-zinc-300 mx-auto mb-3" />
-          <p className="text-zinc-500">暂无人物设定，请点击右上角生成或手动添加。</p>
+        <div className="ui-empty">
+          <Users className="w-12 h-12 text-[rgba(196,92,38,0.45)] mx-auto mb-3" />
+          <p className="text-[var(--ui-muted)]">暂无人物设定，请点击右上角生成或手动添加。</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {characters.map((char, idx) => (
-            <div key={char.id || idx} className="bg-white p-5 rounded-2xl shadow-sm border border-zinc-100">
+            <div key={char.id || idx} className="ui-card p-5">
               <div className="flex items-center justify-between mb-3">
                 <input 
                   type="text" 
                   value={char.name}
                   onChange={(e) => handleUpdateCharacter(char.id, 'name', e.target.value)}
                   placeholder="角色姓名"
-                  className="font-semibold text-lg text-zinc-900 bg-transparent border-none focus:ring-0 p-0 w-32"
+                  className="font-semibold text-lg text-[var(--ui-ink)] bg-transparent border-none focus:ring-0 p-0 w-32"
                 />
                 <div className="flex items-center gap-2">
                   <input 
@@ -1639,11 +1698,11 @@ export default function App() {
                     value={char.role}
                     onChange={(e) => handleUpdateCharacter(char.id, 'role', e.target.value)}
                     placeholder="角色定位"
-                    className="text-xs font-medium px-2 py-1 bg-indigo-50 text-indigo-700 rounded-full border-none focus:ring-0 text-right w-24"
+                    className="text-xs font-medium px-2 py-1 bg-[var(--ui-accent-soft)] text-[var(--ui-accent-text)] rounded-full border-none focus:ring-0 text-right w-24"
                   />
                   <button
                     onClick={() => handleDeleteCharacter(char.id)}
-                    className="p-1 text-zinc-400 hover:text-red-500 transition-colors"
+                    className="p-1 text-[var(--ui-muted)] hover:text-red-500 transition-colors"
                     title="删除人物"
                   >
                     ×
@@ -1654,7 +1713,7 @@ export default function App() {
                 value={char.description}
                 onChange={(e) => handleUpdateCharacter(char.id, 'description', e.target.value)}
                 placeholder="角色描述（性格、背景、关系等）"
-                className="w-full text-sm text-zinc-600 bg-zinc-50 border border-zinc-100 rounded-lg p-3 h-24 resize-none focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                className="w-full text-sm text-stone-600 bg-stone-50 border border-stone-100 rounded-lg p-3 h-24 resize-none focus:outline-none focus:ring-1 focus:ring-[rgba(196,92,38,0.15)]"
               />
             </div>
           ))}
@@ -1671,11 +1730,11 @@ export default function App() {
     return (
       <div className="max-w-4xl mx-auto space-y-6">
         <div className="flex justify-between items-center mb-6">
-          <h2 className="text-2xl font-semibold text-zinc-900">境界体系</h2>
+          <h2 className="text-2xl font-semibold text-[var(--ui-ink)]">境界体系</h2>
           <button
             onClick={handleGenerateRealms}
             disabled={isGenerating || !bookInfo.title || !characters || characters.length === 0}
-            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-70 disabled:cursor-not-allowed shadow-sm"
+            className="ui-btn-primary disabled:opacity-70"
           >
             {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
             AI 生成境界
@@ -1683,30 +1742,30 @@ export default function App() {
         </div>
 
         {realmProgress.realms.length === 0 ? (
-          <div className="text-center py-12 bg-white rounded-2xl border border-zinc-100 border-dashed">
-            <Globe className="w-12 h-12 text-zinc-300 mx-auto mb-3" />
-            <p className="text-zinc-500">暂无境界体系，请先生成人物后点击右上角生成。</p>
-            <p className="text-xs text-zinc-400 mt-1">境界体系将贯穿全文，主角随剧情提升境界。</p>
+          <div className="ui-empty">
+            <Globe className="w-12 h-12 text-[rgba(196,92,38,0.45)] mx-auto mb-3" />
+            <p className="text-[var(--ui-muted)]">暂无境界体系，请先生成人物后点击右上角生成。</p>
+            <p className="text-xs text-[var(--ui-muted)] mt-1">境界体系将贯穿全文，主角随剧情提升境界。</p>
           </div>
         ) : (
           <>
             {/* 当前境界概览 */}
-            <div className="bg-gradient-to-r from-indigo-50 to-purple-50 p-4 rounded-xl border border-indigo-100">
+            <div className="bg-gradient-to-r from-[var(--ui-accent-soft)] to-[#faf6f0] p-4 rounded-xl border border-[rgba(196,92,38,0.2)]">
               <div className="flex items-center justify-between">
                 <div>
-                  <span className="text-sm text-indigo-600">主角{protagName}境界体系</span>
-                  <div className="text-2xl font-bold text-indigo-900 mt-1">
+                  <span className="text-sm text-[var(--ui-accent-text)]">主角{protagName}境界体系</span>
+                  <div className="text-2xl font-bold text-[var(--ui-accent-text)] mt-1">
                     {realmProgress.realms.length} 阶境界
                   </div>
                 </div>
                 <div className="text-right">
-                  <span className="text-sm text-indigo-600">自动分配</span>
-                  <div className="text-lg font-semibold text-indigo-900 mt-1">
+                  <span className="text-sm text-[var(--ui-accent-text)]">自动分配</span>
+                  <div className="text-lg font-semibold text-[var(--ui-accent-text)] mt-1">
                     {Object.keys(realmProgress.chapterRealmMap).length} 个突破节点
                   </div>
                 </div>
               </div>
-              <div className="mt-2 text-xs text-indigo-500">
+              <div className="mt-2 text-xs text-[var(--ui-accent)]">
                 境界按章节进度自动推进，生成章节时AI自动识别当前境界并融入剧情
               </div>
             </div>
@@ -1725,19 +1784,19 @@ export default function App() {
                   <div key={realm.id} className={`p-4 rounded-xl border transition-all ${
                     isStarting ? 'bg-green-50 border-green-200' :
                     bigBreakthrough ? 'bg-amber-50 border-amber-200' :
-                    'bg-white border-zinc-100'
+                    'bg-white border-stone-100'
                   }`}>
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
                         <span className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
                           isStarting ? 'bg-green-600 text-white' :
                           bigBreakthrough ? 'bg-amber-500 text-white' :
-                          'bg-zinc-100 text-zinc-500'
+                          'bg-stone-100 text-[var(--ui-muted)]'
                         }`}>
                           {realm.level}
                         </span>
                         <div>
-                          <span className={`font-semibold ${isStarting ? 'text-green-900' : bigBreakthrough ? 'text-amber-900' : 'text-zinc-700'}`}>
+                          <span className={`font-semibold ${isStarting ? 'text-green-900' : bigBreakthrough ? 'text-amber-900' : 'text-stone-700'}`}>
                             {realm.name}
                           </span>
                           {isStarting && <span className="ml-2 text-xs bg-green-600 text-white px-2 py-0.5 rounded-full">起始</span>}
@@ -1745,7 +1804,7 @@ export default function App() {
                         </div>
                       </div>
                     </div>
-                    <div className="mt-2 ml-11 text-sm text-zinc-600">{realm.description}</div>
+                    <div className="mt-2 ml-11 text-sm text-stone-600">{realm.description}</div>
                     {/* 小境界列表 */}
                     {realm.subRealms && realm.subRealms.length > 0 && (
                       <div className="mt-2 ml-11 flex flex-wrap gap-1.5">
@@ -1756,7 +1815,7 @@ export default function App() {
                             <span key={si} className={`text-xs px-2 py-1 rounded-full border ${
                               isStartSub ? 'bg-green-100 text-green-700 border-green-300' :
                               subBp ? 'bg-amber-100 text-amber-700 border-amber-300' :
-                              'bg-zinc-50 text-zinc-500 border-zinc-200'
+                              'bg-stone-50 text-[var(--ui-muted)] border-stone-200'
                             }`}>
                               {sub.name}{subBp ? `·第${subBp.ch}章` : isStartSub ? '·起始' : ''}
                             </span>
@@ -1776,8 +1835,8 @@ export default function App() {
 
             {/* 章节境界映射 */}
             {Object.keys(realmProgress.chapterRealmMap).length > 0 && (
-              <div className="bg-white p-4 rounded-xl border border-zinc-100">
-                <h3 className="font-semibold text-zinc-800 mb-3">章节突破记录</h3>
+              <div className="bg-white p-4 rounded-xl border border-stone-100">
+                <h3 className="font-semibold text-stone-800 mb-3">章节突破记录</h3>
                 <div className="flex flex-wrap gap-2">
                   {Object.entries(realmProgress.chapterRealmMap)
                     .sort(([a], [b]) => Number(a) - Number(b))
@@ -1811,21 +1870,49 @@ export default function App() {
     const nextStart = toc.length + 1;
     const nextEnd = Math.min(nextStart + 29, bookInfo.targetChapterCount);
     const isComplete = toc.length >= bookInfo.targetChapterCount;
+    const progressPct = bookInfo.targetChapterCount
+      ? Math.min(100, Math.round((toc.length / bookInfo.targetChapterCount) * 100))
+      : 0;
 
     return (
-      <div className="max-w-4xl mx-auto space-y-6">
-        <div className="flex justify-between items-center mb-6">
-          <div>
-            <h2 className="text-2xl font-semibold text-zinc-900">目录大纲</h2>
-            <p className="text-sm text-zinc-500 mt-1">
-              已生成 {toc.length} / {bookInfo.targetChapterCount} 章
-            </p>
+      <div className="max-w-4xl mx-auto space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
+          <div className="min-w-0">
+            <h2 className="text-xl font-semibold text-[var(--ui-ink)] tracking-tight">目录大纲</h2>
+            <div className="mt-2 flex items-center gap-3">
+              <div className="flex-1 max-w-xs h-1.5 bg-stone-100 rounded-full overflow-hidden">
+                <div className="h-full bg-[var(--ui-accent)]/80 rounded-full transition-all" style={{ width: `${progressPct}%` }} />
+              </div>
+              <span className="text-sm font-medium text-stone-600 tabular-nums shrink-0">
+                {toc.length} / {bookInfo.targetChapterCount} 章
+              </span>
+            </div>
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="ui-seg">
+              <button
+                type="button"
+                onClick={() => setTocCompact(true)}
+                className={tocCompact ? 'ui-seg-active' : 'ui-seg-idle'}
+                title="紧凑列表"
+              >
+                <Rows3 className="w-3.5 h-3.5" />
+                紧凑
+              </button>
+              <button
+                type="button"
+                onClick={() => setTocCompact(false)}
+                className={!tocCompact ? 'ui-seg-active' : 'ui-seg-idle'}
+                title="卡片精修"
+              >
+                <LayoutList className="w-3.5 h-3.5" />
+                精修
+              </button>
+            </div>
             <button
               onClick={handleGenerateSingleChapterOutline}
               disabled={isGenerating || !characters || characters.length === 0 || isComplete}
-              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-zinc-700 bg-zinc-100 rounded-lg hover:bg-zinc-200 transition-colors disabled:opacity-70 disabled:cursor-not-allowed"
+              className="ui-btn-secondary disabled:opacity-70 disabled:cursor-not-allowed"
             >
               {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
               生成单章
@@ -1833,46 +1920,123 @@ export default function App() {
             <button
               onClick={handleGenerateTOC}
               disabled={isGenerating || !characters || characters.length === 0 || isComplete}
-              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-70 disabled:cursor-not-allowed shadow-sm"
+              className="ui-btn-primary disabled:opacity-70 disabled:cursor-not-allowed"
             >
               {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
-              {isComplete ? '目录已全部生成' : `批量生成 (${nextStart}-${nextEnd}章)`}
+              {isComplete ? '目录已全部生成' : `批量 (${nextStart}-${nextEnd})`}
             </button>
           </div>
         </div>
 
         {(!toc || toc.length === 0) ? (
-          <div className="text-center py-12 bg-white rounded-2xl border border-zinc-100 border-dashed">
-            <List className="w-12 h-12 text-zinc-300 mx-auto mb-3" />
-            <p className="text-zinc-500">暂无目录大纲，请确保已生成人物后点击生成。</p>
+          <div className="ui-empty">
+            <List className="w-11 h-11 text-[rgba(196,92,38,0.45)] mx-auto mb-3" />
+            <p className="text-stone-600 font-medium">还没有目录大纲</p>
+            <p className="text-sm text-[var(--ui-muted)] mt-1">请先生成人物，再点击批量生成</p>
           </div>
-        ) : (
-          <div className="space-y-3">
+        ) : tocCompact ? (
+          <div className="ui-card overflow-hidden divide-y divide-[rgba(181,69,85,.10)]">
             {toc.map((item, idx) => (
-              <div key={item.chapterNumber} className="bg-white p-5 rounded-2xl shadow-sm border border-zinc-100 flex gap-4 group">
-                <div className="flex-shrink-0 w-12 h-12 bg-zinc-50 rounded-xl flex items-center justify-center font-serif text-xl text-zinc-400">
+              <div
+                key={item.chapterNumber}
+                className="toc-row flex items-center gap-3 px-3 py-2.5 group"
+              >
+                <span className="toc-number w-9 shrink-0 text-center text-xs font-semibold tabular-nums">
                   {item.chapterNumber}
-                </div>
-                <div className="flex-1 space-y-2">
-                  <input 
-                    type="text" 
+                </span>
+                <div className="flex-1 min-w-0">
+                  <input
+                    type="text"
                     value={item.title}
                     onChange={(e) => {
                       const newToc = [...toc];
                       newToc[idx].title = e.target.value;
                       setToc(newToc);
                     }}
-                    className="w-full font-semibold text-zinc-900 bg-transparent border-none focus:ring-0 p-0"
+                    className="w-full font-medium text-sm text-[var(--ui-ink)] bg-transparent border-none focus:ring-0 p-0 truncate"
                     placeholder="章节标题"
                   />
-                  <textarea 
+                  <p className="text-xs text-[var(--ui-muted)] truncate mt-0.5">{item.summary || '暂无摘要'}</p>
+                </div>
+                {chapters[item.chapterNumber] && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" title="已有正文" />
+                )}
+                <div className="relative shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setTocMenuOpen(tocMenuOpen === item.chapterNumber ? null : item.chapterNumber)}
+                    className="p-1.5 rounded-lg text-[var(--ui-muted)] hover:bg-stone-100 hover:text-stone-700"
+                    title="更多"
+                  >
+                    <MoreHorizontal className="w-4 h-4" />
+                  </button>
+                  {tocMenuOpen === item.chapterNumber && (
+                    <div className="absolute right-0 top-full mt-1 w-36 bg-white border border-stone-200 rounded-xl shadow-lg overflow-hidden z-30 py-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveChapterNum(item.chapterNumber);
+                          setActiveTab('chapters');
+                          setTocMenuOpen(null);
+                        }}
+                        className="w-full px-3 py-2 text-sm text-left text-stone-700 hover:bg-stone-50"
+                      >
+                        前往正文
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleRegenerateChapterOutline(item.chapterNumber);
+                          setTocMenuOpen(null);
+                        }}
+                        disabled={isGenerating}
+                        className="w-full px-3 py-2 text-sm text-left text-amber-700 hover:bg-amber-50 disabled:opacity-50"
+                      >
+                        重新生成
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleDeleteTOCItem(item.chapterNumber);
+                          setTocMenuOpen(null);
+                        }}
+                        className="w-full px-3 py-2 text-sm text-left text-red-600 hover:bg-red-50"
+                      >
+                        删除
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {toc.map((item, idx) => (
+              <div key={item.chapterNumber} className="ui-card ui-toc-paper p-5 flex gap-4">
+                <div className="toc-number flex-shrink-0 w-12 h-12 flex items-center justify-center font-serif text-xl">
+                  {item.chapterNumber}
+                </div>
+                <div className="flex-1 space-y-2 min-w-0">
+                  <input
+                    type="text"
+                    value={item.title}
+                    onChange={(e) => {
+                      const newToc = [...toc];
+                      newToc[idx].title = e.target.value;
+                      setToc(newToc);
+                    }}
+                    className="w-full font-semibold text-[var(--ui-ink)] bg-transparent border-none focus:ring-0 p-0"
+                    placeholder="章节标题"
+                  />
+                  <textarea
                     value={item.summary}
                     onChange={(e) => {
                       const newToc = [...toc];
                       newToc[idx].summary = e.target.value;
                       setToc(newToc);
                     }}
-                    className="w-full text-sm text-zinc-600 bg-zinc-50 border border-zinc-100 rounded-lg p-3 h-20 resize-none focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    className="ui-input h-20 resize-none"
                     placeholder="章节内容摘要"
                   />
                 </div>
@@ -1882,20 +2046,20 @@ export default function App() {
                       setActiveChapterNum(item.chapterNumber);
                       setActiveTab('chapters');
                     }}
-                    className="px-3 py-1.5 text-xs font-medium text-indigo-600 bg-indigo-50 rounded-lg hover:bg-indigo-100 transition-colors"
+                    className="px-3 py-1.5 text-xs font-medium text-[var(--ui-accent-text)] bg-[var(--ui-accent-soft)] rounded-lg hover:bg-[var(--ui-accent-soft)]"
                   >
                     前往正文
                   </button>
                   <button
                     onClick={() => handleRegenerateChapterOutline(item.chapterNumber)}
                     disabled={isGenerating}
-                    className="px-3 py-1.5 text-xs font-medium text-amber-600 bg-amber-50 rounded-lg hover:bg-amber-100 transition-colors disabled:opacity-70"
+                    className="px-3 py-1.5 text-xs font-medium text-amber-700 bg-amber-50 rounded-lg hover:bg-amber-100 disabled:opacity-70"
                   >
                     {isGenerating ? <Loader2 className="w-3 h-3 animate-spin" /> : '重新生成'}
                   </button>
                   <button
                     onClick={() => handleDeleteTOCItem(item.chapterNumber)}
-                    className="px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 rounded-lg hover:bg-red-100 transition-colors"
+                    className="px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 rounded-lg hover:bg-red-100"
                   >
                     删除
                   </button>
@@ -1911,8 +2075,8 @@ export default function App() {
   const renderExamples = () => (
     <div className="max-w-4xl mx-auto space-y-6">
       <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-semibold text-zinc-900">小说范文参考</h2>
-        <p className="text-sm text-zinc-500">点击下方链接阅读优秀小说示例</p>
+        <h2 className="text-2xl font-semibold text-[var(--ui-ink)]">小说范文参考</h2>
+        <p className="text-sm text-[var(--ui-muted)]">点击下方链接阅读优秀小说示例</p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1922,17 +2086,17 @@ export default function App() {
             href={link.url}
             target="_blank"
             rel="noopener noreferrer"
-            className="bg-white p-5 rounded-2xl shadow-sm border border-zinc-100 hover:border-amber-300 hover:shadow-md transition-all group"
+            className="bg-white p-5 rounded-2xl shadow-sm border border-stone-100 hover:border-amber-300 hover:shadow-md transition-all group"
           >
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 bg-amber-50 rounded-xl flex items-center justify-center group-hover:bg-amber-100 transition-colors">
                 <BookOpen className="w-5 h-5 text-amber-600" />
               </div>
               <div className="flex-1">
-                <h3 className="font-medium text-zinc-900 group-hover:text-amber-700 transition-colors">{link.title}</h3>
-                <p className="text-xs text-zinc-500 truncate">{link.url}</p>
+                <h3 className="font-medium text-[var(--ui-ink)] group-hover:text-amber-700 transition-colors">{link.title}</h3>
+                <p className="text-xs text-[var(--ui-muted)] truncate">{link.url}</p>
               </div>
-              <Globe className="w-4 h-4 text-zinc-400 group-hover:text-amber-500 transition-colors" />
+              <Globe className="w-4 h-4 text-[var(--ui-muted)] group-hover:text-amber-500 transition-colors" />
             </div>
           </a>
         ))}
@@ -1949,63 +2113,67 @@ export default function App() {
   const renderChapters = () => {
     if (mode === 'shortStory') {
       return (
-        <div className="max-w-4xl mx-auto bg-white rounded-2xl shadow-sm border border-zinc-100 flex flex-col">
-          <div className="p-4 border-b border-zinc-100 flex justify-between items-center bg-white shrink-0">
-            <h3 className="font-semibold text-lg text-zinc-900">
+        <div className="h-full min-h-0 max-w-5xl mx-auto w-full rounded-xl border border-stone-200 bg-white shadow-sm flex flex-col overflow-hidden">
+          <div className="p-4 border-b border-stone-200 flex justify-between items-center bg-white shrink-0 gap-2 flex-wrap">
+            <h3 className="font-semibold text-lg text-[var(--ui-ink)]">
               {shortStoryInfo.title || '未命名短篇'}
             </h3>
             <div className="flex items-center gap-2">
-              {/* 下拉菜单式按钮组 */}
-              <div className="relative group">
+              <div className="relative">
                 <button
-                  className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-zinc-600 bg-zinc-100 rounded-lg hover:bg-zinc-200 transition-colors"
+                  type="button"
+                  onClick={() => setShowShortResetMenu(v => !v)}
+                  className="ui-btn-secondary"
                 >
                   <RefreshCw className="w-4 h-4" />
                   重置
-                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                  </svg>
+                  <ChevronDown className={`w-3 h-3 transition-transform ${showShortResetMenu ? 'rotate-180' : ''}`} />
                 </button>
-                {/* 下拉选项 */}
-                <div className="absolute right-0 top-full mt-1 w-48 bg-white rounded-lg shadow-lg border border-zinc-200 hidden group-hover:block z-10">
-                  <button
-                    onClick={() => {
-                      if (confirm('确定要清空当前正文内容吗？保留标题和大纲。')) {
-                        setShortStoryInfo({ ...shortStoryInfo, content: '', currentSegment: 0 });
-                      }
-                    }}
-                    className="w-full px-4 py-2 text-sm text-left text-zinc-700 hover:bg-zinc-50 first:rounded-t-lg"
-                  >
-                    仅清空正文
-                  </button>
-                  <button
-                    onClick={() => {
-                      if (confirm('确定要重置整个故事吗？这将清空标题、大纲、正文等所有内容，但保留API设置。')) {
-                        setShortStoryInfo({
-                          title: '',
-                          themes: [SHORT_STORY_THEME_NAMES[0]],
-                          targetWordCount: 10000,
-                          outline: '',
-                          content: '',
-                          segments: [],
-                          currentSegment: 0,
-                          isOutlineGenerated: false
-                        });
-                        setShortStoryTitleOptions([]);
-                      }
-                    }}
-                    className="w-full px-4 py-2 text-sm text-left text-red-600 hover:bg-red-50 last:rounded-b-lg border-t border-zinc-100"
-                  >
-                    重置所有故事信息
-                  </button>
-                </div>
+                {showShortResetMenu && (
+                  <div className="ui-menu right-0 top-full mt-1 w-48">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (confirm('确定要清空当前正文内容吗？保留标题和大纲。')) {
+                          setShortStoryInfo({ ...shortStoryInfo, content: '', currentSegment: 0 });
+                          setShowShortResetMenu(false);
+                        }
+                      }}
+                      className="ui-menu-item"
+                    >
+                      仅清空正文
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (confirm('确定要重置整个故事吗？这将清空标题、大纲、正文等所有内容，但保留API设置。')) {
+                          setShortStoryInfo({
+                            title: '',
+                            themes: [SHORT_STORY_THEME_NAMES[0]],
+                            targetWordCount: 10000,
+                            outline: '',
+                            content: '',
+                            segments: [],
+                            currentSegment: 0,
+                            isOutlineGenerated: false
+                          });
+                          setShortStoryTitleOptions([]);
+                          setShowShortResetMenu(false);
+                        }
+                      }}
+                      className="ui-menu-item text-red-600 hover:bg-red-50"
+                    >
+                      重置所有故事信息
+                    </button>
+                  </div>
+                )}
               </div>
               {!shortStoryInfo.content ? (
                 // 第一次生成
                 <button
                   onClick={() => handleGenerateShortStoryContent(false)}
                   disabled={isGenerating || !shortStoryInfo.outline}
-                  className="flex items-center gap-2 px-4 py-1.5 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-70"
+                  className="ui-btn-primary disabled:opacity-70"
                 >
                   {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
                   开始生成（第一批）
@@ -2016,7 +2184,7 @@ export default function App() {
                   <button
                     onClick={() => handleGenerateShortStoryContent(false)}
                     disabled={isGenerating}
-                    className="flex items-center gap-2 px-4 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-100 rounded-lg hover:bg-indigo-200 transition-colors disabled:opacity-70"
+                    className="ui-btn-secondary disabled:opacity-70"
                   >
                     {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Feather className="w-4 h-4" />}
                     继续写（不结尾）
@@ -2024,7 +2192,7 @@ export default function App() {
                   <button
                     onClick={() => handleGenerateShortStoryContent(true)}
                     disabled={isGenerating}
-                    className="flex items-center gap-2 px-4 py-1.5 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-70"
+                    className="ui-btn-primary disabled:opacity-70"
                   >
                     {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
                     生成结局（收尾）
@@ -2035,55 +2203,99 @@ export default function App() {
           </div>
           {/* 分段进度显示 */}
           {shortStoryInfo.content && (
-            <div className="px-4 py-2 bg-indigo-50 border-b border-indigo-100 flex items-center justify-between">
-              <span className="text-sm text-indigo-700">
+            <div className="px-4 py-2 bg-[var(--ui-accent-soft)] border-b border-[rgba(196,92,38,0.2)] flex items-center justify-between">
+              <span className="text-sm text-[var(--ui-accent-text)]">
                 已生成 {shortStoryInfo.currentSegment || 1} 段 | 总字数 {shortStoryInfo.content.length} 字
               </span>
-              <span className="text-xs text-indigo-500">
+              <span className="text-xs text-[var(--ui-accent)]">
                 每段限制上下文1500字，避免超过4096token限制
               </span>
             </div>
           )}
           
-          <div className="p-6 bg-zinc-50/50">
-            <textarea
-              value={shortStoryInfo.content}
-              onChange={(e) => setShortStoryInfo({ ...shortStoryInfo, content: e.target.value })}
-              placeholder={isGenerating ? "AI 正在奋笔疾书，请稍候..." : "点击右上角「开始生成」，或者在此处手动输入内容..."}
-              className="w-full min-h-[600px] p-6 bg-white border border-zinc-200 rounded-xl shadow-sm resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-zinc-800 leading-relaxed"
-            />
+                    <div className="px-4 py-2 border-b border-stone-100 flex items-center gap-2 bg-white shrink-0">
+            <div className="ui-seg">
+              <button
+                type="button"
+                onClick={() => setChapterReadMode(true)}
+                className={chapterReadMode ? 'ui-seg-active' : 'ui-seg-idle'}
+              >
+                阅读
+              </button>
+              <button
+                type="button"
+                onClick={() => setChapterReadMode(false)}
+                className={!chapterReadMode ? 'ui-seg-active' : 'ui-seg-idle'}
+              >
+                编辑
+              </button>
+            </div>
+            <span className="text-xs text-[var(--ui-muted)]">同一份正文，仅切换展示</span>
+          </div>
+          <div className="flex-1 min-h-0 p-4 md:p-6 overflow-y-auto bg-white/20">
+            {shortStoryInfo.content ? (
+              chapterReadMode ? (
+                <div className="ui-prose-read py-2">{shortStoryInfo.content}</div>
+              ) : (
+                <textarea
+                  value={shortStoryInfo.content}
+                  onChange={(e) => setShortStoryInfo({ ...shortStoryInfo, content: e.target.value })}
+                  placeholder="在此编辑正文…"
+                  className="ui-input w-full min-h-[calc(100vh-16rem)] max-w-3xl mx-auto block p-5 resize-y leading-7 bg-white"
+                />
+              )
+            ) : (
+              <div className="ui-empty min-h-[280px] flex flex-col items-center justify-center">
+                {isGenerating ? (
+                  <>
+                    <Loader2 className="w-10 h-10 mb-3 animate-spin text-[var(--ui-accent)]" />
+                    <p className="text-[var(--ui-muted)]">AI 正在写作…</p>
+                  </>
+                ) : (
+                  <>
+                    <FileText className="w-10 h-10 mb-3 text-stone-300" />
+                    <p className="text-[var(--ui-muted)]">尚无正文</p>
+                    <p className="text-xs text-[var(--ui-muted)] mt-1">点击右上角开始生成，或切换到编辑后手动输入</p>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
       );
     }
 
     return (
-      <div className="flex gap-6 bg-white rounded-2xl shadow-sm border border-zinc-100 p-6 min-h-[600px]">
-        <div className="w-64 border-r border-zinc-100 pr-6 flex flex-col">
-          <div className="pb-4 border-b border-zinc-100 flex justify-between items-center">
-            <h3 className="font-medium text-zinc-900">章节列表</h3>
+      <div className="ui-chapter-workspace flex h-full min-h-0 overflow-hidden">
+        <div className="ui-chapter-rail w-56 md:w-64 shrink-0 flex flex-col">
+          <div className="px-3 py-2.5 border-b border-[var(--ui-line)] flex justify-between items-center shrink-0">
+            <h3 className="font-medium text-[var(--ui-ink)] text-sm">章节列表</h3>
+            <span className="text-[11px] text-[var(--ui-muted)] tabular-nums">{toc.filter(t => chapters[t.chapterNumber]).length}/{toc.length}</span>
           </div>
-          <div className="flex-1 pt-4 space-y-1 overflow-y-auto max-h-[800px]">
+          <div className="flex-1 py-1.5 space-y-0.5 overflow-y-auto min-h-0 px-1.5">
             {toc.length === 0 ? (
-              <p className="text-xs text-zinc-400 p-4 text-center">请先生成目录</p>
+              <div className="ui-empty !py-8 !mx-1 !border-0 bg-transparent">
+                <List className="w-8 h-8 text-stone-300 mx-auto mb-2" />
+                <p className="text-xs text-[var(--ui-muted)]">请先生成目录</p>
+              </div>
             ) : (
               toc.map(item => (
                 <div
                   key={item.chapterNumber}
-                  className={`group flex items-center gap-1 px-2 py-1.5 rounded-lg text-sm transition-colors ${
-                    activeChapterNum === item.chapterNumber 
-                      ? 'bg-indigo-50 text-indigo-700 font-medium' 
-                      : 'text-zinc-600 hover:bg-zinc-100'
+                  className={`group flex items-center gap-1 px-2 py-1.5 rounded-lg text-sm transition-colors border ${
+                    activeChapterNum === item.chapterNumber
+                      ? 'bg-[var(--ui-accent-soft)] text-[var(--ui-accent-text)] font-medium border-[rgba(181,69,85,.26)]'
+                      : 'text-stone-600 border-transparent hover:bg-white/65 hover:border-white/70'
                   }`}
                 >
                   <button
                     onClick={() => setActiveChapterNum(item.chapterNumber)}
-                    className="flex-1 text-left truncate flex items-center gap-2"
+                    className="flex-1 text-left truncate flex items-center gap-2 min-w-0"
                   >
-                    {generatingChapterNum === item.chapterNumber && <Loader2 className="w-3 h-3 animate-spin text-indigo-500" />}
-                    第{item.chapterNumber}章 {item.title}
+                    {generatingChapterNum === item.chapterNumber && <Loader2 className="w-3 h-3 animate-spin text-[var(--ui-accent)] shrink-0" />}
+                    <span className="truncate">第{item.chapterNumber}章 {item.title}</span>
                   </button>
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
                     {!chapters[item.chapterNumber] && (
                       <button
                         onClick={(e) => {
@@ -2091,7 +2303,7 @@ export default function App() {
                           handleGenerateChapter(item.chapterNumber);
                         }}
                         disabled={isGenerating}
-                        className="p-1 text-indigo-600 hover:bg-indigo-100 rounded"
+                        className="p-1 text-[var(--ui-accent-text)] hover:bg-[var(--ui-accent-soft)] rounded"
                         title="生成内容"
                       >
                         <Wand2 className="w-3.5 h-3.5" />
@@ -2110,33 +2322,51 @@ export default function App() {
                       </button>
                     )}
                   </div>
-                  {chapters[item.chapterNumber] && <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0 ml-1" />}
+                  {chapters[item.chapterNumber] && <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />}
                 </div>
               ))
             )}
           </div>
         </div>
 
-        <div className="flex-1 flex flex-col bg-white">
+        <div className="flex-1 flex flex-col min-w-0 bg-white/32">
           {activeChapterNum ? (
             <>
-              <div className="p-4 border-b border-zinc-100 flex justify-between items-center bg-white">
-                <h3 className="font-semibold text-lg text-zinc-900">
+              <div className="px-4 py-3 border-b border-[var(--ui-line)] flex flex-wrap justify-between items-center gap-2 bg-white/46 backdrop-blur-sm">
+                <h3 className="font-semibold text-base text-[var(--ui-ink)] min-w-0 truncate">
                   第{activeChapterNum}章 {toc.find(t => t.chapterNumber === activeChapterNum)?.title}
                 </h3>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="ui-seg">
+                    <button
+                      type="button"
+                      onClick={() => setChapterReadMode(true)}
+                      className={chapterReadMode ? 'ui-seg-active' : 'ui-seg-idle'}
+                      title="阅读模式"
+                    >
+                      阅读
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setChapterReadMode(false)}
+                      className={!chapterReadMode ? 'ui-seg-active' : 'ui-seg-idle'}
+                      title="编辑模式"
+                    >
+                      编辑
+                    </button>
+                  </div>
                   <button
                     onClick={isBatchGenerating ? handleStopBatchGenerate : handleBatchGenerateChapters}
                     disabled={isGenerating && !isBatchGenerating}
-                    className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-indigo-600 bg-indigo-50 rounded-lg hover:bg-indigo-100 transition-colors disabled:opacity-70"
+                    className="ui-btn-secondary disabled:opacity-70"
                   >
                     <Play className="w-4 h-4" />
-                    {isBatchGenerating ? '暂停批量' : '批量生成下20章'}
+                    {isBatchGenerating ? '停止批量' : '批量下20章'}
                   </button>
                   {chapters[activeChapterNum] && (
                     <button
                       onClick={() => handleDeleteChapter(activeChapterNum)}
-                      className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-red-600 bg-red-50 rounded-lg hover:bg-red-100 transition-colors"
+                      className="ui-btn-ghost text-red-600 hover:bg-red-50"
                     >
                       删除本章
                     </button>
@@ -2144,31 +2374,37 @@ export default function App() {
                   <button
                     onClick={() => handleGenerateChapter(activeChapterNum)}
                     disabled={isGenerating}
-                    className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-70"
+                    className="ui-btn-primary disabled:opacity-70"
                   >
                     {isGenerating && generatingChapterNum === activeChapterNum ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
                     {chapters[activeChapterNum] ? '重新生成' : '生成本章'}
                   </button>
                 </div>
               </div>
-              <div className="p-8">
+              <div className="flex-1 min-h-0 p-4 md:p-6 overflow-y-auto bg-white/20">
                 {chapters[activeChapterNum] ? (
-                  <textarea
-                    value={chapters[activeChapterNum]}
-                    onChange={(e) => setChapters(prev => ({ ...prev, [activeChapterNum]: e.target.value }))}
-                    className="w-full min-h-[560px] max-w-3xl mx-auto block p-6 bg-zinc-50 border border-zinc-200 rounded-xl resize-y focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-zinc-800 leading-relaxed"
-                  />
+                  chapterReadMode ? (
+                    <div className="ui-prose-read py-4">{chapters[activeChapterNum]}</div>
+                  ) : (
+                    <textarea
+                      value={chapters[activeChapterNum]}
+                      onChange={(e) => setChapters(prev => ({ ...prev, [activeChapterNum]: e.target.value }))}
+                      className="ui-input w-full h-full min-h-[calc(100vh-14rem)] max-w-3xl mx-auto block p-5 resize-y leading-7 bg-white"
+                    />
+                  )
                 ) : (
-                  <div className="min-h-[400px] flex flex-col items-center justify-center text-zinc-400">
+                  <div className="ui-empty min-h-[280px] flex flex-col items-center justify-center m-2">
                     {generatingChapterNum === activeChapterNum ? (
                       <>
-                        <Loader2 className="w-12 h-12 mb-3 animate-spin text-indigo-400" />
-                        <p>正在奋笔疾书中...</p>
+                        <Loader2 className="w-10 h-10 mb-3 animate-spin text-[var(--ui-accent)]" />
+                        <p className="text-[var(--ui-muted)]">正在生成本章…</p>
+                        <p className="text-xs text-[var(--ui-muted)] mt-1">顶栏「生成中」为全局状态</p>
                       </>
                     ) : (
                       <>
-                        <FileText className="w-12 h-12 mb-3 opacity-20" />
-                        <p>点击右上角生成本章内容</p>
+                        <FileText className="w-10 h-10 mb-3 text-stone-300" />
+                        <p className="text-[var(--ui-muted)]">本章尚无正文</p>
+                        <p className="text-xs text-[var(--ui-muted)] mt-1">点击右上角「生成本章」或左侧魔法棒</p>
                       </>
                     )}
                   </div>
@@ -2176,9 +2412,10 @@ export default function App() {
               </div>
             </>
           ) : (
-            <div className="min-h-[400px] flex flex-col items-center justify-center text-zinc-400">
-              <BookOpen className="w-12 h-12 mb-3 opacity-20" />
-              <p>请在左侧选择一个章节</p>
+            <div className="ui-empty m-6 min-h-[280px] flex flex-col items-center justify-center">
+              <BookOpen className="w-10 h-10 mb-3 text-stone-300" />
+              <p className="text-[var(--ui-muted)]">请在左侧选择一个章节</p>
+              <p className="text-xs text-[var(--ui-muted)] mt-1">有绿点表示已写正文</p>
             </div>
           )}
         </div>
@@ -2323,160 +2560,154 @@ export default function App() {
   ];
 
   return (
-    <div className="flex h-screen bg-zinc-50 text-zinc-900 font-sans">
-      {/* Main Sidebar */}
-      <div className="w-20 md:w-64 bg-white border-r border-zinc-200 flex flex-col overflow-y-auto">
-        <div className="h-16 flex items-center justify-center md:justify-start md:px-6 border-b border-zinc-100 shrink-0">
-          <BookOpen className="w-6 h-6 text-indigo-600 shrink-0" />
-          <h1 className="font-semibold text-lg tracking-tight ml-3 hidden md:block">AI 小说家</h1>
-        </div>
-        
-        <div className="p-4 border-b border-zinc-100 shrink-0">
-          <div className="flex bg-zinc-100 p-1 rounded-lg">
-            <button
-              onClick={() => { setMode('novel'); setActiveTab('book'); }}
-              className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors ${mode === 'novel' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700'}`}
-            >
-              长篇连载
-            </button>
-            <button
-              onClick={() => { setMode('shortStory'); setActiveTab('book'); }}
-              className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors ${mode === 'shortStory' ? 'bg-white shadow-sm text-zinc-900' : 'text-zinc-500 hover:text-zinc-700'}`}
-            >
-              短篇故事
-            </button>
+    <div className="flex h-screen text-[var(--ui-ink)] font-sans overflow-hidden bg-transparent">
+      {/* Main Sidebar - glass, full height, tools expanded */}
+      <aside className="ui-sidebar-panel w-[4.75rem] md:w-64 lg:w-72 flex flex-col h-full shrink-0">
+        <div className="h-14 flex items-center justify-center md:justify-start md:px-4 border-b border-[var(--ui-line)] shrink-0">
+          <div className="ui-logo-mark">
+            <BookOpen className="w-4 h-4 text-white shrink-0" />
+          </div>
+          <div className="ml-2.5 hidden md:block min-w-0">
+            <h1 className="font-semibold text-[15px] tracking-tight text-[var(--ui-ink)] leading-tight">小说家</h1>
+            <p className="text-[10px] text-[var(--ui-muted)] leading-tight mt-0.5">绯雾书房 · 写作工作台</p>
           </div>
         </div>
 
-        <nav className="py-4 px-3 space-y-1">
-          {navItems.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => setActiveTab(item.id as Tab)}
-              className={`w-full flex items-center justify-center md:justify-start px-3 py-3 rounded-xl transition-colors ${
-                activeTab === item.id 
-                  ? 'bg-indigo-50 text-indigo-700 font-medium' 
-                  : 'text-zinc-600 hover:bg-zinc-100'
-              }`}
-            >
-              <item.icon className="w-5 h-5 shrink-0" />
-              <span className="ml-3 hidden md:block">{item.label}</span>
-            </button>
-          ))}
-        </nav>
-
-        <div className="p-4 border-t border-zinc-100 space-y-3">
-          <button
-            onClick={() => setActiveTab('examples')}
-            className={`w-full flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
-              activeTab === 'examples'
-                ? 'bg-amber-100 text-amber-700 border border-amber-200'
-                : 'text-amber-600 bg-amber-50 border border-amber-100 hover:bg-amber-100'
-            }`}
-          >
-            <BookOpen className="w-4 h-4" />
-            <span className="hidden md:block">范文参考</span>
-          </button>
-          <a
-            href="#"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium text-indigo-600 bg-indigo-50 border border-indigo-100 rounded-lg hover:bg-indigo-100 transition-colors"
-          >
-            <Globe className="w-4 h-4" />
-            <span className="hidden md:block">我的博客</span>
-          </a>
-          
-          <div className="relative">
-            <button
-              onClick={() => setShowDownloadMenu(!showDownloadMenu)}
-              disabled={(mode === 'novel' && Object.keys(chapters).length === 0) || (mode === 'shortStory' && !shortStoryInfo.content)}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium text-zinc-600 bg-white border border-zinc-200 rounded-lg hover:bg-zinc-50 transition-colors disabled:opacity-50"
-            >
-              <Download className="w-4 h-4" />
-              <span className="hidden md:block">导出全书</span>
-            </button>
-            
-            {showDownloadMenu && (
-              <div className="absolute bottom-full mb-2 left-0 w-full bg-white border border-zinc-200 rounded-lg shadow-lg overflow-hidden z-50">
-                <button
-                  onClick={() => {
-                    handleDownload('txt');
-                    setShowDownloadMenu(false);
-                  }}
-                  className="w-full px-4 py-2 text-sm text-left hover:bg-zinc-50 transition-colors"
-                >
-                  导出为 TXT
-                </button>
-                <button
-                  onClick={() => {
-                    handleDownload('docx');
-                    setShowDownloadMenu(false);
-                  }}
-                  className="w-full px-4 py-2 text-sm text-left hover:bg-zinc-50 transition-colors border-t border-zinc-100"
-                >
-                  导出为 Word (.docx)
-                </button>
-              </div>
-            )}
+        <div className="p-3 border-b border-[var(--ui-line)] shrink-0">
+          <div className="ui-mode-switch">
+            <button type="button" onClick={() => { setMode('novel'); setActiveTab('book'); }} className={mode === 'novel' ? 'ui-mode-active' : 'ui-mode-idle'}>长篇</button>
+            <button type="button" onClick={() => { setMode('shortStory'); setActiveTab('book'); }} className={mode === 'shortStory' ? 'ui-mode-active' : 'ui-mode-idle'}>短篇</button>
           </div>
-          
-          <button
-            onClick={handleExportData}
-            className="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium text-blue-600 bg-blue-50 border border-blue-100 rounded-lg hover:bg-blue-100 transition-colors"
-          >
-            <Download className="w-4 h-4" />
-            <span className="hidden md:block">备份数据</span>
-          </button>
-          
-          <button
-            onClick={handleImportData}
-            className="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium text-green-600 bg-green-50 border border-green-100 rounded-lg hover:bg-green-100 transition-colors"
-          >
-            <Upload className="w-4 h-4" />
-            <span className="hidden md:block">恢复数据</span>
-          </button>
-          
-          <div className="flex items-center justify-end px-1 mt-1 gap-2">
-            <button
-              onClick={handleResetBookInfo}
-              className="text-[11px] flex items-center gap-1 px-1.5 py-1 rounded transition-colors text-zinc-400 hover:text-amber-600 hover:bg-amber-50"
-              title="重置书籍信息（保留API设置）"
-            >
-              <RefreshCw className="w-3 h-3" />
-              <span className="hidden md:block">重开新书</span>
+        </div>
+
+        {mode === 'novel' && (
+          <div className="ui-progress-card hidden md:block">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <span className="text-[11px] font-semibold text-[var(--ui-ink)]">创作进度</span>
+              <span className="text-[11px] tabular-nums text-[var(--ui-accent-text)]">
+                {[!!bookInfo.title, characters.length > 0, toc.length > 0, Object.keys(chapters).length > 0].filter(Boolean).length}/4
+              </span>
+            </div>
+            <div className="ui-progress-track">
+              <div className="ui-progress-fill" style={{ width: `${([!!bookInfo.title, characters.length > 0, toc.length > 0, Object.keys(chapters).length > 0].filter(Boolean).length / 4) * 100}%` }} />
+            </div>
+            <p className="text-[10px] leading-relaxed text-[var(--ui-muted)] mt-2">
+              {!bookInfo.title ? '下一步：选择题材并构思书名' : characters.length === 0 ? '下一步：生成人物关系' : toc.length === 0 ? '下一步：生成大纲目录' : Object.keys(chapters).length === 0 ? '下一步：开始撰写第一章' : '作品正在持续生长'}
+            </p>
+          </div>
+        )}
+
+        <div className="flex-1 min-h-0 flex flex-col overflow-y-auto">
+          <div className="px-3 pt-3 pb-1 hidden md:block shrink-0">
+            <p className="ui-side-label">写作流程</p>
+          </div>
+          <nav className="px-2.5 pb-2 space-y-1.5">
+            {navItems.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setActiveTab(item.id as Tab)}
+                className={`ui-side-btn ${activeTab === item.id ? 'ui-nav-active' : 'ui-nav-idle'}`}
+              >
+                <item.icon className="w-5 h-5 shrink-0" />
+                <span className="ml-2.5 hidden md:block text-sm">{item.label}</span>
+              </button>
+            ))}
+          </nav>
+
+          <div className="mt-auto px-2.5 pb-3 pt-2 border-t border-[var(--ui-line)] space-y-1.5">
+            <div className="px-1 pb-1 hidden md:block">
+              <p className="ui-side-label">工具</p>
+            </div>
+
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowDownloadMenu(!showDownloadMenu)}
+                disabled={(mode === 'novel' && Object.keys(chapters).length === 0) || (mode === 'shortStory' && !shortStoryInfo.content)}
+                className="ui-side-btn ui-side-btn-solid disabled:opacity-45 disabled:cursor-not-allowed"
+              >
+                <Download className="w-4 h-4 shrink-0" />
+                <span className="ml-2.5 hidden md:block">导出全书</span>
+              </button>
+              {showDownloadMenu && (
+                <div className="ui-menu bottom-full mb-2 left-0 right-0 md:left-0 md:right-auto md:w-full">
+                  <button type="button" onClick={() => { handleDownload('txt'); setShowDownloadMenu(false); }} className="ui-menu-item">导出为 TXT</button>
+                  <button type="button" onClick={() => { handleDownload('docx'); setShowDownloadMenu(false); }} className="ui-menu-item">导出为 Word</button>
+                </div>
+              )}
+            </div>
+
+            <button type="button" onClick={() => setActiveTab('examples')} className={`ui-side-btn ${activeTab === 'examples' ? 'ui-nav-active' : 'ui-side-btn-tool'}`}>
+              <FileText className="w-4 h-4 shrink-0" />
+              <span className="ml-2.5 hidden md:block text-sm">范文参考</span>
             </button>
+
+            <a href="https://github.com/sqdft" target="_blank" rel="noopener noreferrer" className="ui-side-btn ui-side-btn-tool no-underline">
+              <Globe className="w-4 h-4 shrink-0" />
+              <span className="ml-2.5 hidden md:block text-sm">我的博客</span>
+            </a>
+
+            <button type="button" onClick={handleExportData} className="ui-side-btn ui-side-btn-tool">
+              <Download className="w-4 h-4 shrink-0" />
+              <span className="ml-2.5 hidden md:block text-sm">备份数据</span>
+            </button>
+
+            <button type="button" onClick={handleImportData} className="ui-side-btn ui-side-btn-tool">
+              <Upload className="w-4 h-4 shrink-0" />
+              <span className="ml-2.5 hidden md:block text-sm">恢复数据</span>
+            </button>
+
+            <button type="button" onClick={handleResetBookInfo} className="ui-side-btn ui-side-btn-warn">
+              <RefreshCw className="w-4 h-4 shrink-0" />
+              <span className="ml-2.5 hidden md:block text-sm">重开新书</span>
+            </button>
+
             <button
+              type="button"
               onClick={handleReset}
-              className={`text-[11px] flex items-center gap-1 px-1.5 py-1 rounded transition-colors ${
-                showResetConfirm 
-                  ? 'bg-red-100 text-red-700 font-medium' 
-                  : 'text-zinc-400 hover:text-red-600 hover:bg-red-50'
-              }`}
-              title="重置所有数据"
+              className={`ui-side-btn ${showResetConfirm ? 'ui-side-btn-danger-active' : 'ui-side-btn-danger'}`}
             >
-              <RefreshCw className={`w-3 h-3 ${showResetConfirm ? 'animate-spin' : ''}`} />
-              <span className="hidden md:block">{showResetConfirm ? '确认?' : '重置'}</span>
+              <RefreshCw className={`w-4 h-4 shrink-0 ${showResetConfirm ? 'animate-spin' : ''}`} />
+              <span className="ml-2.5 hidden md:block text-sm">{showResetConfirm ? '再点确认重置' : '重置全部'}</span>
             </button>
           </div>
         </div>
-      </div>
+      </aside>
 
-      {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <header className="h-16 bg-white border-b border-zinc-200 flex items-center px-6 shrink-0">
-          <h2 className="font-medium text-zinc-800">
-            {activeTab === 'settings' && '系统设置'}
-            {activeTab === 'book' && (mode === 'novel' ? '书籍基本信息' : '短篇故事设定')}
-            {activeTab === 'characters' && '主要人物设定'}
-            {activeTab === 'realms' && '境界体系'}
-            {activeTab === 'toc' && '分章目录大纲'}
-            {activeTab === 'chapters' && (mode === 'novel' ? '小说正文生成' : '故事正文生成')}
-            {activeTab === 'examples' && '小说范文参考'}
-          </h2>
+      <div className="ui-main-panel flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
+        <header className="ui-header">
+          <div className="min-w-0">
+            <h2 className="font-semibold text-[var(--ui-ink)] text-[15px] truncate">
+              {activeTab === 'settings' && '系统设置'}
+              {activeTab === 'book' && (mode === 'novel' ? '书籍信息' : '短篇设定')}
+              {activeTab === 'characters' && '人物关系'}
+              {activeTab === 'realms' && '境界体系'}
+              {activeTab === 'toc' && '大纲目录'}
+              {activeTab === 'chapters' && (mode === 'novel' ? '章节正文' : '故事正文')}
+              {activeTab === 'examples' && '范文参考'}
+            </h2>
+          </div>
+          <div className="flex-1 min-w-0" />
+          {(bookInfo.title || shortStoryInfo.title) && (
+            <span className="hidden sm:inline text-sm text-[var(--ui-muted)] truncate max-w-[14rem]">
+              {mode === 'novel' ? bookInfo.title : shortStoryInfo.title}
+            </span>
+          )}
+          {mode === 'novel' && bookInfo.targetChapterCount > 0 && (
+            <span className="text-xs tabular-nums shrink-0 font-semibold text-[var(--ui-accent-text)] bg-[var(--ui-accent-soft)] px-2.5 py-1 rounded-full border border-[rgba(196,81,31,0.2)]">
+              {Object.keys(chapters).length}/{bookInfo.targetChapterCount} 章
+            </span>
+          )}
+          {isGenerating && (
+            <span className="ui-status-pill shrink-0">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              生成中
+            </span>
+          )}
         </header>
 
-        <main className="flex-1 overflow-y-auto p-6 md:p-8">
+        <main className={`flex-1 min-h-0 overflow-y-auto ${activeTab === 'chapters' ? 'p-0' : 'p-5 md:p-8'}`}>
           {activeTab === 'settings' && renderSettings()}
           {activeTab === 'book' && renderBookInfo()}
           {activeTab === 'characters' && renderCharacters()}
