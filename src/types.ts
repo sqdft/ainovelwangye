@@ -12,6 +12,20 @@ export interface Settings {
   temperature: number; // 温度参数，控制创作自由度 (0-2)
 }
 
+
+export interface ProviderProfile {
+  id: string;
+  name: string;
+  provider: Provider;
+  apiKey: string;
+  apiKeys: string[];
+  currentKeyIndex: number;
+  baseUrl: string;
+  model: string;
+  availableModels: ModelInfo[];
+  updatedAt: number;
+}
+
 export interface BookInfo {
   title: string;
   themes: string[];

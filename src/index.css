@@ -519,3 +519,38 @@ textarea.ui-input,
   --ui-sidebar: transparent;
   --ui-sidebar-edge: rgba(255, 255, 255, 0.5);
 }
+
+/* 供应商卡片：描边+底色更清晰，避免和粉紫背景糊在一起 */
+.ui-provider-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.85rem 0.95rem;
+  border-radius: 14px;
+  border: 1.5px solid rgba(120, 90, 140, 0.22);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow:
+    0 2px 10px rgba(90, 70, 110, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+  cursor: pointer;
+}
+.ui-provider-card:hover {
+  border-color: rgba(212, 83, 126, 0.45);
+  box-shadow:
+    0 4px 16px rgba(90, 70, 110, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.95);
+  transform: translateY(-1px);
+}
+.ui-provider-card-active {
+  border-color: var(--ui-accent);
+  border-width: 2px;
+  background: linear-gradient(145deg, rgba(255, 248, 252, 0.98), rgba(255, 255, 255, 0.95));
+  box-shadow:
+    0 0 0 3px rgba(212, 83, 126, 0.14),
+    0 6px 18px rgba(212, 83, 126, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 1);
+}
+.ui-provider-card-active:hover {
+  border-color: var(--ui-accent-hover);
+}

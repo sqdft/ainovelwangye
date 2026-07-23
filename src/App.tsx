@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { BookOpen, Settings as SettingsIcon, Users, List, FileText, Download, Loader2, Wand2, Play, Feather, RefreshCw, Globe, Upload, MoreHorizontal, ChevronDown, Eye, Pencil, LayoutList, Rows3, Search } from 'lucide-react';
-import { Settings, BookInfo, Character, TOCItem, Provider, ShortStoryInfo, Realm, SubRealm, RealmProgress, ModelInfo, NovelMemory } from './types';
+import { Settings, BookInfo, Character, TOCItem, Provider, ShortStoryInfo, Realm, SubRealm, RealmProgress, ModelInfo, NovelMemory, ProviderProfile } from './types';
 import { dualGet, dualSet, dualClearAll } from './lib/storage';
 import { normalizeBaseUrl, proxyFetch } from './lib/devProxy';
 import { generateBookInfo, generateCharacters, generateRealms, generateTOC, generateChapterContent, generateShortStoryContent, generateShortStoryTitles, generateShortStoryOutlineFromTitle, generateShortStorySegments, generateBookTitles, updateNovelMemory } from './services/aiService';
@@ -11,6 +11,37 @@ import { saveAs } from 'file-saver';
 
 type Tab = 'settings' | 'book' | 'characters' | 'realms' | 'toc' | 'chapters' | 'examples';
 type Mode = 'novel' | 'shortStory';
+
+type ToastKind = 'info' | 'success' | 'error' | 'warn';
+type ToastItem = { id: number; kind: ToastKind; message: string; actionLabel?: string; actionTab?: Tab };
+
+type TaskKind =
+  | 'idle'
+  | 'models'
+  | 'titles'
+  | 'bookInfo'
+  | 'characters'
+  | 'realms'
+  | 'toc'
+  | 'chapter'
+  | 'batch'
+  | 'shortTitles'
+  | 'shortOutline'
+  | 'shortContent'
+  | 'other';
+
+type TaskStatus = 'idle' | 'running' | 'error';
+
+type TaskState = {
+  kind: TaskKind;
+  label: string;
+  status: TaskStatus;
+  progress?: { current: number; total: number };
+  cancellable?: boolean;
+  lastError?: string;
+};
+
+
 
 const LENGTHS = [
   { label: '短篇 (100章)', value: '100', count: 100 },
@@ -229,7 +260,7 @@ const ThemeSelector = ({
                   onChange(safeSelectedThemes.filter(t => t !== theme));
                 } else {
                   if (safeSelectedThemes.length < 5) onChange([...safeSelectedThemes, theme]);
-                  else alert('最多只能选择5个主题');
+                  else pushToast('最多只能选择5个主题', 'warn');
                 }
               }}
               className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
@@ -286,12 +317,236 @@ export default function App() {
   const [isBatchGenerating, setIsBatchGenerating] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [showDownloadMenu, setShowDownloadMenu] = useState(false);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [batchFailedChapters, setBatchFailedChapters] = useState<number[]>([]);
+  const [chapterQualityNotes, setChapterQualityNotes] = useState<Record<number, string[]>>({});
+  const toastIdRef = useRef(0);
+  const [taskState, setTaskState] = useState<TaskState>({ kind: 'idle', label: '', status: 'idle' });
+  const [providerProfiles, setProviderProfiles] = useDualStorage<ProviderProfile[]>('ai_novel_provider_profiles', []);
+  const [activeProfileId, setActiveProfileId] = useDualStorage<string | null>('ai_novel_active_profile_id', null);
+  const [profileNameDraft, setProfileNameDraft] = useState('');
+  const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
+  const lastRetryRef = useRef<null | (() => Promise<void>)>(null);
+  const cancelTaskRef = useRef(false);
 
   const [tocCompact, setTocCompact] = useState(true);
   const [tocMenuOpen, setTocMenuOpen] = useState<number | null>(null);
   const [chapterReadMode, setChapterReadMode] = useState(true);
   const [showShortResetMenu, setShowShortResetMenu] = useState(false);
   const stopBatchRef = useRef(false);
+
+  const pushToast = (
+    message: string,
+    kind: ToastKind = 'info',
+    action?: { label: string; tab: Tab }
+  ) => {
+    const id = ++toastIdRef.current;
+    setToasts(prev => [
+      ...prev.slice(-4),
+      {
+        id,
+        kind,
+        message,
+        actionLabel: action?.label,
+        actionTab: action?.tab,
+      },
+    ]);
+    window.setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, kind === 'error' ? 8000 : 4500);
+  };
+
+  const dismissToast = (id: number) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  };
+
+  const isTaskBusy = taskState.status === 'running' || isGenerating || isBatchGenerating;
+
+  const clearTask = () => {
+    setTaskState({ kind: 'idle', label: '', status: 'idle' });
+    lastRetryRef.current = null;
+  };
+
+  const requestCancelTask = () => {
+    cancelTaskRef.current = true;
+    stopBatchRef.current = true;
+    pushToast('已请求停止…', 'warn');
+  };
+
+  const runTask = async (opts: {
+    kind: TaskKind;
+    label: string;
+    cancellable?: boolean;
+    progress?: { current: number; total: number };
+    run: () => Promise<void>;
+  }) => {
+    if (taskState.status === 'running' || isGenerating) {
+      pushToast('当前有任务进行中，请稍候或先停止', 'warn');
+      return;
+    }
+    cancelTaskRef.current = false;
+    const retryFn = async () => {
+      await runTask(opts);
+    };
+    lastRetryRef.current = retryFn;
+    setTaskState({
+      kind: opts.kind,
+      label: opts.label,
+      status: 'running',
+      progress: opts.progress,
+      cancellable: opts.cancellable,
+    });
+    setIsGenerating(true);
+    try {
+      await opts.run();
+      if (cancelTaskRef.current) {
+        setTaskState({
+          kind: opts.kind,
+          label: opts.label,
+          status: 'error',
+          lastError: '已取消',
+          cancellable: opts.cancellable,
+        });
+        pushToast('任务已取消', 'warn');
+      } else {
+        clearTask();
+      }
+    } catch (error: any) {
+      const msg = error?.message || String(error) || '未知错误';
+      setTaskState({
+        kind: opts.kind,
+        label: opts.label,
+        status: 'error',
+        lastError: msg,
+        progress: opts.progress,
+        cancellable: opts.cancellable,
+      });
+      pushToast(msg, 'error');
+    } finally {
+      setIsGenerating(false);
+      setIsBatchGenerating(false);
+      setGeneratingChapterNum(null);
+    }
+  };
+
+  const retryLastTask = async () => {
+    if (lastRetryRef.current) {
+      await lastRetryRef.current();
+    } else {
+      pushToast('没有可重试的任务', 'warn');
+    }
+  };
+
+  const settingsFromProfile = (p: ProviderProfile): Settings => ({
+    ...settings,
+    provider: p.provider,
+    apiKey: p.apiKey,
+    apiKeys: p.apiKeys || [],
+    currentKeyIndex: p.currentKeyIndex || 0,
+    baseUrl: p.baseUrl,
+    model: p.model,
+    availableModels: p.availableModels || [],
+  });
+
+  const profileFromSettings = (name: string, id?: string): ProviderProfile => ({
+    id: id || `prof_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    name: name.trim() || `${PROVIDERS[settings.provider]?.label || settings.provider} · ${settings.model || '默认模型'}`,
+    provider: settings.provider,
+    apiKey: settings.apiKey || '',
+    apiKeys: settings.apiKeys || [],
+    currentKeyIndex: settings.currentKeyIndex || 0,
+    baseUrl: settings.baseUrl || '',
+    model: settings.model || '',
+    availableModels: settings.availableModels || [],
+    updatedAt: Date.now(),
+  });
+
+  const activateProviderProfile = (p: ProviderProfile) => {
+    setActiveProfileId(p.id);
+    setEditingProfileId(p.id);
+    setProfileNameDraft(p.name);
+    setSettings(settingsFromProfile(p));
+    pushToast(`已切换：${p.name}`, 'success');
+  };
+
+  const saveProviderProfile = (asNew = false) => {
+    const name = profileNameDraft.trim() || `${PROVIDERS[settings.provider]?.label || '供应商'} · ${settings.model || '模型'}`;
+    if (!asNew && activeProfileId) {
+      const exists = providerProfiles.some(p => p.id === activeProfileId);
+      if (exists) {
+        setProviderProfiles(providerProfiles.map(p =>
+          p.id === activeProfileId ? profileFromSettings(name, activeProfileId) : p
+        ));
+      } else {
+        const created = profileFromSettings(name);
+        setProviderProfiles([...providerProfiles, created]);
+        setActiveProfileId(created.id);
+        setEditingProfileId(created.id);
+      }
+      setProfileNameDraft(name);
+      pushToast('供应商卡片已更新', 'success');
+      return;
+    }
+    const created = profileFromSettings(name);
+    setProviderProfiles([...providerProfiles, created]);
+    setActiveProfileId(created.id);
+    setEditingProfileId(created.id);
+    setProfileNameDraft(created.name);
+    pushToast('已保存新供应商卡片', 'success');
+  };
+
+  const deleteProviderProfile = (id: string) => {
+    const next = providerProfiles.filter(p => p.id !== id);
+    setProviderProfiles(next);
+    if (activeProfileId === id) {
+      setActiveProfileId(next[0]?.id || null);
+      if (next[0]) {
+        setSettings(settingsFromProfile(next[0]));
+        setProfileNameDraft(next[0].name);
+        setEditingProfileId(next[0].id);
+      } else {
+        setEditingProfileId(null);
+        setProfileNameDraft('');
+      }
+    }
+    pushToast('已删除卡片', 'info');
+  };
+
+  /** 添加新供应商：不清空已保存卡片，只进入「空白草稿」编辑态 */
+  const beginNewProviderProfile = () => {
+    setActiveProfileId(null);
+    setEditingProfileId(null);
+    setProfileNameDraft('');
+    // 表单给干净默认值，不覆盖已保存的其它卡片
+    const custom = PROVIDERS['custom'] || PROVIDERS['openai'] || Object.values(PROVIDERS)[0];
+    setSettings(prev => ({
+      ...prev,
+      provider: 'custom',
+      apiKey: '',
+      apiKeys: [],
+      currentKeyIndex: 0,
+      baseUrl: custom?.baseUrl || 'https://api.openai.com/v1',
+      model: custom?.model || '',
+      availableModels: [],
+      // 保留 minWordCount / temperature 等写作偏好
+      minWordCount: prev.minWordCount,
+      temperature: prev.temperature,
+    }));
+    pushToast('已进入新建供应商：填好后点「保存为新卡片」', 'info');
+  };
+
+
+  const requireGate = (
+    ok: boolean,
+    message: string,
+    tab: Tab,
+    actionLabel = '去处理'
+  ): boolean => {
+    if (ok) return true;
+    pushToast(message, 'warn', { label: actionLabel, tab });
+    setActiveTab(tab);
+    return false;
+  };
 
   // Settings State
   const [settings, setSettings] = useDualStorage<Settings>('ai_novel_settings', {
@@ -369,6 +624,59 @@ export default function App() {
   });
   const [shortStoryTitleOptions, setShortStoryTitleOptions] = useDualStorage<string[]>('ai_novel_shortStoryTitleOptions', []);
 
+  const novelProgress = (() => {
+    const hasTitle = !!bookInfo.title && !!bookInfo.isTitleSelected;
+    const hasChars = characters.length > 0;
+    const hasToc = toc.length > 0;
+    const written = Object.keys(chapters).length;
+    const target = Math.max(bookInfo.targetChapterCount || 1, 1);
+    const chapterRatio = Math.min(written / target, 1);
+    const score = (hasTitle ? 0.25 : 0) + (hasChars ? 0.25 : 0) + (hasToc ? 0.25 : 0) + 0.25 * chapterRatio;
+    const doneSteps = [hasTitle, hasChars, hasToc, written > 0].filter(Boolean).length;
+    let nextHint = '下一步：选择题材并构思书名';
+    if (!hasTitle) nextHint = '下一步：选择题材并构思书名';
+    else if (!bookInfo.outline) nextHint = '下一步：生成或填写故事大纲';
+    else if (!hasChars) nextHint = '下一步：生成人物关系';
+    else if (!hasToc) nextHint = '下一步：生成大纲目录';
+    else if (written === 0) nextHint = '下一步：开始写第一章正文';
+    else if (written < toc.length) nextHint = `下一步：继续写正文（已写 ${written}/${toc.length} 章目录）`;
+    else if (toc.length < target) nextHint = `下一步：补充目录（目录 ${toc.length}/${target}）`;
+    else nextHint = '可导出全书，或精修章节';
+    return { score, doneSteps, nextHint, written, target, tocCount: toc.length };
+  })();
+
+  const shortProgress = (() => {
+    const hasTheme = (shortStoryInfo.themes || []).length > 0;
+    const hasTitle = !!shortStoryInfo.title;
+    const hasOutline = !!(shortStoryInfo.outline || '').trim();
+    const segs = shortStoryInfo.segments || [];
+    const hasSegs = segs.length > 0;
+    const doneSegs = segs.filter(s => s.isGenerated).length;
+    const words = (shortStoryInfo.content || '').replace(/\s/g, '').length;
+    const target = Math.max(shortStoryInfo.targetWordCount || 10000, 1);
+    const wordRatio = Math.min(words / target, 1);
+    const score =
+      (hasTheme ? 0.15 : 0) +
+      (hasTitle ? 0.2 : 0) +
+      (hasOutline || hasSegs ? 0.25 : 0) +
+      0.4 * (hasSegs ? doneSegs / Math.max(segs.length, 1) : wordRatio);
+    const doneSteps = [
+      hasTheme && hasTitle,
+      hasOutline || hasSegs,
+      words > 0,
+      wordRatio >= 0.9 || (hasSegs && doneSegs >= segs.length),
+    ].filter(Boolean).length;
+    let nextHint = '下一步：选择题材并填写标题';
+    if (!hasTitle) nextHint = '下一步：选择题材并填写标题';
+    else if (!hasOutline && !hasSegs) nextHint = '下一步：填写脑洞大纲或生成分段规划';
+    else if (hasSegs && doneSegs < segs.length) nextHint = `下一步：写第 ${doneSegs + 1}/${segs.length} 段`;
+    else if (words < target * 0.9) nextHint = `下一步：继续写正文（约 ${words}/${target} 字）`;
+    else nextHint = '可收束结局并导出';
+    return { score, doneSteps, nextHint, words, target, doneSegs, segTotal: segs.length };
+  })();
+
+
+
   // Handlers
   const handleProviderChange = (provider: Provider) => {
     const providerConfig = PROVIDERS[provider];
@@ -398,12 +706,12 @@ export default function App() {
 
   const handleDetectModels = async () => {
     if (settings.provider === 'gemini') {
-      alert('Gemini 不支持模型检测，请手动输入模型名称');
+      pushToast('Gemini 不支持模型检测，请手动输入模型名称', 'info');
       return;
     }
 
     if (!settings.baseUrl) {
-      alert('请先设置 Base URL');
+      pushToast('请先设置 Base URL', 'warn');
       return;
     }
 
@@ -412,49 +720,57 @@ export default function App() {
       : settings.apiKey;
 
     if (!apiKey && settings.provider !== 'kilo') {
-      alert('请先设置 API Key');
+      pushToast('请先设置 API Key', 'warn');
       return;
     }
 
-    setIsGenerating(true);
-    try {
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json'
-      };
-      if (apiKey) {
-        headers['Authorization'] = `Bearer ${apiKey}`;
-      }
+    await runTask({
+      kind: 'models',
+      label: '检测可用模型',
+      cancellable: false,
+      run: async () => {
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json'
+        };
+        if (apiKey) {
+          headers['Authorization'] = `Bearer ${apiKey}`;
+        }
 
-      const modelsUrl = `${normalizeBaseUrl(settings.baseUrl)}/models`;
-      const res = await proxyFetch(modelsUrl, {
-        method: 'GET',
-        headers
-      });
+        const modelsUrl = `${normalizeBaseUrl(settings.baseUrl)}/models`;
+        const res = await proxyFetch(modelsUrl, {
+          method: 'GET',
+          headers
+        });
 
-      if (!res.ok) {
-        throw new Error(`API 请求失败 (${res.status})`);
-      }
+        if (!res.ok) {
+          throw new Error(`API 请求失败 (${res.status})`);
+        }
 
-      const data = await res.json();
-      
-      if (!data.data || !Array.isArray(data.data)) {
-        throw new Error('API 返回格式异常');
-      }
+        const data = await res.json();
+        
+        if (!data.data || !Array.isArray(data.data)) {
+          throw new Error('API 返回格式异常');
+        }
 
-      const models: ModelInfo[] = data.data.map((m: any) => ({
-        id: m.id,
-        name: m.id,
-        provider: settings.provider,
-        contextLength: m.context_window
-      }));
+        const models: ModelInfo[] = data.data.map((m: any) => ({
+          id: m.id,
+          name: m.id,
+          provider: settings.provider,
+          contextLength: m.context_window
+        }));
 
-      setSettings({ ...settings, availableModels: models });
-      alert(`检测成功！共发现 ${models.length} 个可用模型`);
-    } catch (error: any) {
-      alert(`模型检测失败: ${error.message}`);
-    } finally {
-      setIsGenerating(false);
-    }
+        setSettings({ ...settings, availableModels: models });
+        // 同步到当前卡片
+        if (activeProfileId) {
+          setProviderProfiles(prev => prev.map(p =>
+            p.id === activeProfileId
+              ? { ...p, availableModels: models, model: settings.model || p.model, updatedAt: Date.now() }
+              : p
+          ));
+        }
+        pushToast(`检测成功！共发现 ${models.length} 个可用模型`, 'success');
+      },
+    });
   };
 
   const emptyNovelMemory: NovelMemory = {
@@ -536,20 +852,16 @@ export default function App() {
 
   // 生成书名选项（新增）
   const handleGenerateBookTitles = async () => {
-    if (!bookInfo.themes || bookInfo.themes.length === 0) {
-      alert('请先选择至少一个主题！');
-      return;
-    }
-    setIsGenerating(true);
-    try {
-      const titles = await generateBookTitles(bookInfo.themes, bookInfo.lengthType, settings, bookInfo.targetChapterCount);
-      setBookInfo({ ...bookInfo, titleOptions: titles, isTitleSelected: false, title: '' });
-      alert(`成功生成 ${titles.length} 个书名选项！请选择一个您喜欢的书名。`);
-    } catch (error: any) {
-      alert(error.message || '生成书名失败');
-    } finally {
-      setIsGenerating(false);
-    }
+    if (!requireGate(!!bookInfo.themes?.length, '请先选择至少一个主题', 'book', '去选题材')) return;
+    await runTask({
+      kind: 'titles',
+      label: '生成书名候选',
+      run: async () => {
+        const titles = await generateBookTitles(bookInfo.themes, bookInfo.lengthType, settings, bookInfo.targetChapterCount);
+        setBookInfo({ ...bookInfo, titleOptions: titles, isTitleSelected: false, title: '' });
+        pushToast(`已生成 ${titles.length} 个书名，请点选一个`, 'success');
+      },
+    });
   };
 
   // 选择书名（新增）
@@ -561,50 +873,43 @@ export default function App() {
   };
 
   const handleGenerateBookInfo = async () => {
-    // 检查是否已选择书名
-    if (!bookInfo.isTitleSelected || !bookInfo.title) {
-      alert('请先生成并选择一个书名！');
-      return;
-    }
-    setIsGenerating(true);
-    try {
-      const info = await generateBookInfo(bookInfo, settings);
-      clearNovelDownstream('book');
-      setBookInfo({ ...bookInfo, ...info });
-      setActiveTab('book');
-    } catch (error: any) {
-      alert(error.message || '生成书籍信息失败');
-    } finally {
-      setIsGenerating(false);
-    }
+    if (!requireGate(!!bookInfo.isTitleSelected && !!bookInfo.title, '请先生成并选择一个书名', 'book', '去选书名')) return;
+    await runTask({
+      kind: 'bookInfo',
+      label: '生成大纲与世界观',
+      run: async () => {
+        const info = await generateBookInfo(bookInfo, settings);
+        clearNovelDownstream('book');
+        setBookInfo({ ...bookInfo, ...info });
+        setActiveTab('book');
+        pushToast('大纲与世界观已生成', 'success', { label: '去生成人物', tab: 'characters' });
+      },
+    });
   };
 
   const handleGenerateCharacters = async () => {
-    if (!bookInfo.title || !bookInfo.outline) {
-      alert('请先生成或填写书籍信息！');
-      return;
-    }
-    setIsGenerating(true);
-    try {
-      const chars = await generateCharacters(bookInfo, settings);
-      clearNovelDownstream('toc');
-      setCharacters(chars);
-      setActiveTab('characters');
-    } catch (error: any) {
-      alert(error.message || '生成人物关系失败');
-    } finally {
-      setIsGenerating(false);
-    }
+    if (!requireGate(!!bookInfo.title && !!bookInfo.outline, '请先生成或填写书籍信息（书名+大纲）', 'book', '去书籍信息')) return;
+    await runTask({
+      kind: 'characters',
+      label: '生成人物关系',
+      run: async () => {
+        const chars = await generateCharacters(bookInfo, settings);
+        clearNovelDownstream('toc');
+        setCharacters(chars);
+        setActiveTab('characters');
+        pushToast(`已生成 ${chars.length} 位人物`, 'success', { label: '去大纲目录', tab: 'toc' });
+      },
+    });
   };
 
   // 生成境界体系
   const handleGenerateRealms = async () => {
-    if (!bookInfo.title || !characters || characters.length === 0) {
-      alert('请先生成书籍信息和人物！');
-      return;
-    }
-    setIsGenerating(true);
-    try {
+    if (!requireGate(!!bookInfo.title, '请先完成书籍信息', 'book', '去书籍信息')) return;
+    if (!requireGate(characters.length > 0, '请先生成人物关系', 'characters', '去人物')) return;
+    await runTask({
+      kind: 'realms',
+      label: '生成规则/境界体系',
+      run: async () => {
       const realms = await generateRealms(bookInfo, characters, settings);
       // 自动分配突破节点：大境界+小境界，前期快后期慢
       const totalChapters = bookInfo.targetChapterCount;
@@ -644,11 +949,8 @@ export default function App() {
         chapterRealmMap
       });
       setActiveTab('realms');
-    } catch (error: any) {
-      alert(error.message || '生成境界体系失败');
-    } finally {
-      setIsGenerating(false);
-    }
+          },
+    });
   };
 
   // 手动添加人物
@@ -665,7 +967,7 @@ export default function App() {
   // 删除人物
   const handleDeleteCharacter = (id: string) => {
     if (!characters || characters.length <= 1) {
-      alert('至少保留一个角色');
+      pushToast('至少保留一个角色', 'warn');
       return;
     }
     setCharacters(characters.filter(c => c.id !== id));
@@ -679,63 +981,57 @@ export default function App() {
   };
 
   const handleGenerateTOC = async () => {
-    if (!bookInfo.title || !characters || characters.length === 0) {
-      alert('请先生成或填写书籍信息！');
-      return;
-    }
+    if (!requireGate(!!bookInfo.title, '请先完成书籍信息', 'book', '去书籍信息')) return;
+    if (!requireGate(characters.length > 0, '请先生成人物关系', 'characters', '去人物')) return;
     
     const startIndex = toc.length + 1;
     if (startIndex > bookInfo.targetChapterCount) {
-      alert('已生成全部目录！');
+      pushToast('已生成全部目录！', 'success');
       return;
     }
 
-    setIsGenerating(true);
-    try {
+    await runTask({
+      kind: 'toc',
+      label: '生成大纲目录',
+      run: async () => {
       const batchSize = 30;
       const existingTitles = toc.map(item => item.title);
       const existingSummaries = toc.map(item => item.summary);
       const newChapters = await generateTOC(bookInfo, characters, settings, startIndex, batchSize, existingTitles, existingSummaries);
       const similar = findSimilarSummaries(newChapters, toc);
       if (similar.length > 0) {
-        alert(`本批目录已生成，但发现剧情摘要疑似重复：\n${similar.slice(0, 5).join('\n')}${similar.length > 5 ? '\n…共 ' + similar.length + ' 条' : ''}\n\n可在大纲目录中手动改写摘要后继续。`);
+        pushToast(`本批目录已生成，但发现剧情摘要疑似重复：\n${similar.slice(0, 5).join('\n')}${similar.length > 5 ? '\n…共 ' + similar.length + ' 条' : ''}\n\n可在大纲目录中手动改写摘要后继续。`, 'success');
       }
       setToc([...toc, ...newChapters]);
       setActiveTab('toc');
-    } catch (error: any) {
-      alert(error.message || '生成目录大纲失败');
-    } finally {
-      setIsGenerating(false);
-    }
+          },
+    });
   };
 
   // 只生成单章目录（接在末尾）
   const handleGenerateSingleChapterOutline = async () => {
-    if (!bookInfo.title || !characters || characters.length === 0) {
-      alert('请先生成或填写书籍信息！');
-      return;
-    }
+    if (!requireGate(!!bookInfo.title, '请先完成书籍信息', 'book', '去书籍信息')) return;
+    if (!requireGate(characters.length > 0, '请先生成人物关系', 'characters', '去人物')) return;
     
     const nextChapterNum = toc.length + 1;
     if (nextChapterNum > bookInfo.targetChapterCount) {
-      alert('已生成全部目录！');
+      pushToast('已生成全部目录！', 'success');
       return;
     }
 
-    setIsGenerating(true);
-    try {
+    await runTask({
+      kind: 'toc',
+      label: '生成单章目录',
+      run: async () => {
       const existingTitles = toc.map(item => item.title);
       // 只生成1章
       const newChapters = await generateTOC(bookInfo, characters, settings, nextChapterNum, 1, existingTitles, toc.map(item => item.summary));
       if (newChapters.length > 0) {
         setToc([...toc, ...newChapters]);
-        alert(`第${nextChapterNum}章目录生成成功！`);
+        pushToast(`第${nextChapterNum}章目录生成成功！`, 'success');
       }
-    } catch (error: any) {
-      alert(error.message || '生成单章目录失败');
-    } finally {
-      setIsGenerating(false);
-    }
+          },
+    });
   };
 
   // 删除指定目录项
@@ -756,13 +1052,13 @@ export default function App() {
 
   // 重新生成指定章节的目录
   const handleRegenerateChapterOutline = async (chapterNum: number) => {
-    if (!bookInfo.title || !characters || characters.length === 0) {
-      alert('请先生成或填写书籍信息！');
-      return;
-    }
+    if (!requireGate(!!bookInfo.title, '请先完成书籍信息', 'book', '去书籍信息')) return;
+    if (!requireGate(characters.length > 0, '请先生成人物关系', 'characters', '去人物')) return;
 
-    setIsGenerating(true);
-    try {
+    await runTask({
+      kind: 'toc',
+      label: '重生成章纲',
+      run: async () => {
       // 获取其他章节的标题（不包括当前要重新生成的）
       const existingTitles = toc
         .filter(item => item.chapterNumber !== chapterNum)
@@ -782,13 +1078,10 @@ export default function App() {
         delete updatedChapters[chapterNum];
         setChapters(updatedChapters);
         
-        alert(`第${chapterNum}章目录已重新生成！`);
+        pushToast(`第${chapterNum}章目录已重新生成！`, 'info');
       }
-    } catch (error: any) {
-      alert(error.message || '重新生成目录失败');
-    } finally {
-      setIsGenerating(false);
-    }
+          },
+    });
   };
 
   // 编辑目录标题
@@ -844,7 +1137,16 @@ export default function App() {
     }
     const warnings = validateChapterContent(content, tocItem, previousContent);
     if (warnings.length > 0) {
-      alert(`第${tocItem.chapterNumber}章已生成，但发现质量提醒：\n${warnings.join('\n')}`);
+      setChapterQualityNotes(prev => ({ ...prev, [tocItem.chapterNumber]: warnings }));
+      if (!isBatchGenerating) {
+        pushToast(`第${tocItem.chapterNumber}章有 ${warnings.length} 条质量提醒`, 'warn');
+      }
+    } else {
+      setChapterQualityNotes(prev => {
+        const next = { ...prev };
+        delete next[tocItem.chapterNumber];
+        return next;
+      });
     }
     let nextMemory = memory;
     try {
@@ -860,19 +1162,21 @@ export default function App() {
     const tocItem = toc.find(t => t.chapterNumber === chapterNum);
     if (!tocItem) return;
 
-    setIsGenerating(true);
-    setGeneratingChapterNum(chapterNum);
-    try {
-      const { content } = await generateChapterWithQualityGate(tocItem, chapters);
-      setChapters(prev => ({ ...prev, [chapterNum]: content }));
-      setActiveChapterNum(chapterNum);
-      setActiveTab('chapters');
-    } catch (error: any) {
-      alert(error.message || '生成章节内容失败');
-    } finally {
-      setGeneratingChapterNum(null);
-      setIsGenerating(false);
-    }
+    await runTask({
+      kind: 'chapter',
+      label: `生成第 ${chapterNum} 章正文`,
+      cancellable: true,
+      run: async () => {
+        setGeneratingChapterNum(chapterNum);
+        if (cancelTaskRef.current) throw new Error('已取消');
+        const { content } = await generateChapterWithQualityGate(tocItem, chapters);
+        if (cancelTaskRef.current) throw new Error('已取消');
+        setChapters(prev => ({ ...prev, [chapterNum]: content }));
+        setActiveChapterNum(chapterNum);
+        setActiveTab('chapters');
+        setGeneratingChapterNum(null);
+      },
+    });
   };
 
   // 删除指定章节
@@ -906,83 +1210,109 @@ export default function App() {
     setActiveChapterNum(1);
   };
 
-  const handleBatchGenerateChapters = async () => {
-    const ungenerated = toc.filter(t => !chapters[t.chapterNumber]);
-    const toGenerate = ungenerated.slice(0, 20);
-    
+    const handleStopBatchGenerate = () => {
+    requestCancelTask();
+  };
+
+const handleBatchGenerateChapters = async (opts?: { onlyFailed?: boolean; limit?: number }) => {
+    const limit = opts?.limit ?? 20;
+    let pool = toc.filter(t => !chapters[t.chapterNumber]);
+    if (opts?.onlyFailed && batchFailedChapters.length > 0) {
+      const failedSet = new Set(batchFailedChapters);
+      pool = toc.filter(t => failedSet.has(t.chapterNumber) && !chapters[t.chapterNumber]);
+    }
+    const toGenerate = pool.slice(0, limit);
+
     if (toGenerate.length === 0) {
-      alert('当前目录中的所有章节都已生成！请先生成更多目录。');
-      return;
-    }
-
-    setIsGenerating(true);
-    setIsBatchGenerating(true);
-    stopBatchRef.current = false;
-    
-    let currentChapters = { ...chapters };
-    let currentMemory = novelMemory;
-
-    for (const item of toGenerate) {
-      if (stopBatchRef.current) break;
-      setGeneratingChapterNum(item.chapterNumber);
-      setActiveChapterNum(item.chapterNumber);
-      try {
-        const { content, nextMemory } = await generateChapterWithQualityGate(item, currentChapters, currentMemory);
-        currentMemory = nextMemory;
-        currentChapters = { ...currentChapters, [item.chapterNumber]: content };
-        setChapters(prev => ({ ...prev, [item.chapterNumber]: content }));
-      } catch (error: any) {
-        alert(`生成第${item.chapterNumber}章失败: ${error.message}`);
-        break;
+      if (toc.length === 0) {
+        requireGate(false, '请先生成大纲目录', 'toc', '去目录');
+      } else {
+        pushToast('当前目录章节都已生成，请先补充更多目录', 'info', { label: '去目录', tab: 'toc' });
+        setActiveTab('toc');
       }
-    }
-    setGeneratingChapterNum(null);
-    setIsBatchGenerating(false);
-    setIsGenerating(false);
-  };
-
-  const handleStopBatchGenerate = () => {
-    stopBatchRef.current = true;
-  };
-
-  // Short Story Handlers
-  const handleGenerateShortStoryTitles = async () => {
-    if (!shortStoryInfo.themes || shortStoryInfo.themes.length === 0) {
-      alert('请先选择至少一个主题！');
       return;
     }
-    setIsGenerating(true);
-    try {
+
+    await runTask({
+      kind: 'batch',
+      label: `批量生成正文 0/${toGenerate.length}`,
+      cancellable: true,
+      progress: { current: 0, total: toGenerate.length },
+      run: async () => {
+        setIsBatchGenerating(true);
+        stopBatchRef.current = false;
+        cancelTaskRef.current = false;
+        const failed: number[] = [];
+        let okCount = 0;
+        let currentChapters = { ...chapters };
+        let currentMemory = novelMemory;
+
+        for (let i = 0; i < toGenerate.length; i++) {
+          if (stopBatchRef.current || cancelTaskRef.current) break;
+          const item = toGenerate[i];
+          setGeneratingChapterNum(item.chapterNumber);
+          setActiveChapterNum(item.chapterNumber);
+          setTaskState(prev => ({
+            ...prev,
+            label: `批量生成正文 ${i + 1}/${toGenerate.length} · 第${item.chapterNumber}章`,
+            progress: { current: i + 1, total: toGenerate.length },
+            status: 'running',
+            kind: 'batch',
+            cancellable: true,
+          }));
+          try {
+            const { content, nextMemory } = await generateChapterWithQualityGate(item, currentChapters, currentMemory);
+            currentMemory = nextMemory;
+            currentChapters = { ...currentChapters, [item.chapterNumber]: content };
+            setChapters(prev => ({ ...prev, [item.chapterNumber]: content }));
+            okCount += 1;
+          } catch (error: any) {
+            failed.push(item.chapterNumber);
+            pushToast(`第${item.chapterNumber}章失败：${error.message || '未知错误'}，已跳过继续`, 'error');
+          }
+        }
+        setBatchFailedChapters(failed);
+        setGeneratingChapterNum(null);
+        setIsBatchGenerating(false);
+        if (stopBatchRef.current || cancelTaskRef.current) {
+          pushToast(`已停止。完成 ${okCount} 章，失败 ${failed.length} 章`, 'warn');
+        } else if (failed.length > 0) {
+          pushToast(`批量结束：成功 ${okCount}，失败 ${failed.length}（可点重试失败）`, 'warn');
+        } else {
+          pushToast(`批量完成：成功 ${okCount} 章`, 'success');
+        }
+      },
+    });
+  };
+
+  const handleGenerateShortStoryTitles = async () => {
+    if (!requireGate(!!shortStoryInfo.themes?.length, '请先选择至少一个主题', 'book', '去选题材')) return;
+    await runTask({
+      kind: 'shortTitles',
+      label: '生成短篇标题',
+      run: async () => {
       const titles = await generateShortStoryTitles(shortStoryInfo.themes, settings);
       setShortStoryTitleOptions(titles);
-    } catch (error: any) {
-      alert(error.message || '生成标题失败');
-    } finally {
-      setIsGenerating(false);
-    }
+          },
+    });
   };
 
   const handleGenerateShortStoryOutline = async () => {
-    if (!shortStoryInfo.title) {
-      alert('请先填写或选择一个故事标题！');
-      return;
-    }
-    setIsGenerating(true);
-    try {
+    if (!requireGate(!!shortStoryInfo.title, '请先填写或选择一个故事标题', 'book', '去填标题')) return;
+    await runTask({
+      kind: 'shortOutline',
+      label: '生成短篇分段',
+      run: async () => {
       // 生成分段大纲
       const segments = await generateShortStorySegments(shortStoryInfo, settings);
-      const outlineText = segments.map(s => `${s.segmentNumber}. ${s.title}：${s.summary}`).join('\n');
       setShortStoryInfo({
         ...shortStoryInfo,
         segments,
         isOutlineGenerated: true,
-        outline: shortStoryInfo.outline ? `${shortStoryInfo.outline}\n\n【AI 分段规划】\n${outlineText}` : outlineText
       });
-    } catch (error: any) {
-      alert(error.message || '生成大纲失败');
-    } finally {
-      setIsGenerating(false);
-    }
+      pushToast(`已生成 ${segments.length} 段结构，可在下方编辑摘要`, 'success', { label: '去写正文', tab: 'chapters' });
+          },
+    });
   };
 
   // 检测并去除新生成内容与已有内容的重复部分（增强版）
@@ -1079,7 +1409,7 @@ export default function App() {
   // 生成/续写短篇：按分段规划逐段推进
   const handleGenerateShortStoryContent = async (options?: { segmentIndex?: number; rewrite?: boolean; forceFinal?: boolean }) => {
     if (!shortStoryInfo.outline && (!shortStoryInfo.segments || shortStoryInfo.segments.length === 0)) {
-      alert('请先填写故事核心脑洞/大纲，或生成分段规划！');
+      requireGate(false, '请先填写脑洞大纲，或生成分段规划', 'book', '去短篇设定');
       return;
     }
 
@@ -1095,8 +1425,17 @@ export default function App() {
       : targetIndex >= segments.length - 1;
     const isFinalBatch = options?.forceFinal ?? isLastSegment;
 
-    setIsGenerating(true);
-    try {
+    const segLabel = options?.forceFinal
+      ? '生成短篇结局'
+      : options?.rewrite
+        ? `重写短篇第 ${(options.segmentIndex ?? 0) + 1} 段`
+        : '生成短篇正文';
+    await runTask({
+      kind: 'shortContent',
+      label: segLabel,
+      cancellable: true,
+      run: async () => {
+
       const MAX_CONTEXT_LENGTH = 1500;
       let context = shortStoryInfo.content || '';
       // 重写当前段：去掉该段及之后内容（按已生成段拼接）
@@ -1119,7 +1458,7 @@ export default function App() {
 
       const cleanedContent = removeDuplicateContent(context, newContent);
       if (cleanedContent.trim().length < 50 && newContent.trim().length > 100) {
-        alert('检测到生成内容与已有内容高度重复，已跳过重复部分。建议重写当前段，或调整分段摘要后再生成。');
+        pushToast('检测到生成内容与已有内容高度重复，已跳过重复部分。建议重写当前段，或调整分段摘要后再生成。', 'warn');
       }
 
       let nextSegments = segments;
@@ -1153,11 +1492,8 @@ export default function App() {
         currentSegment: nextIndex,
       });
       setActiveTab('chapters');
-    } catch (error: any) {
-      alert(error.message || '生成故事内容失败');
-    } finally {
-      setIsGenerating(false);
-    }
+      },
+    });
   };
 
   const handleDownload = async (format: 'txt' | 'docx' = 'txt') => {
@@ -1305,6 +1641,99 @@ export default function App() {
           </span>
         </div>
         <div className="space-y-4">
+          {/* 已保存供应商卡片：一键切换 */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="block text-sm font-medium text-stone-700">供应商卡片</label>
+              <span className="text-[11px] text-[var(--ui-muted)]">保存后可随时切换配置与模型</span>
+            </div>
+            {providerProfiles.length === 0 ? (
+              <p className="text-xs text-[var(--ui-muted)] mb-2 ui-seed-tip">
+                还没有卡片。点「＋ 添加新供应商」填配置，再「保存为新卡片」；可保存多套随时切换。
+              </p>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                {providerProfiles.map(p => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => activateProviderProfile(p)}
+                    className={`ui-provider-card text-left ${
+                      activeProfileId === p.id ? 'ui-provider-card-active' : ''
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-[var(--ui-ink)] truncate">{p.name}</div>
+                        <div className="text-[11px] text-[var(--ui-muted)] mt-0.5 truncate">
+                          {PROVIDERS[p.provider]?.label || p.provider} · {p.model || '未选模型'}
+                        </div>
+                      </div>
+                      {activeProfileId === p.id && (
+                        <span className="text-[10px] font-semibold text-[var(--ui-accent-text)] shrink-0">使用中</span>
+                      )}
+                    </div>
+                    <div className="flex gap-2 mt-2" onClick={e => e.stopPropagation()}>
+                      <button
+                        type="button"
+                        className="text-[11px] text-red-600 hover:underline"
+                        onClick={() => {
+                          if (confirm(`删除卡片「${p.name}」？`)) deleteProviderProfile(p.id);
+                        }}
+                      >
+                        删除
+                      </button>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="flex flex-wrap gap-2 mb-2">
+              <button
+                type="button"
+                onClick={beginNewProviderProfile}
+                className="ui-btn-secondary text-sm whitespace-nowrap"
+              >
+                ＋ 添加新供应商
+              </button>
+              {!activeProfileId && (
+                <span className="text-[11px] text-[var(--ui-muted)] self-center">
+                  当前为新建草稿，不会改动已有卡片
+                </span>
+              )}
+            </div>
+            <div className="flex flex-col sm:flex-row gap-2 mb-1">
+              <input
+                type="text"
+                value={profileNameDraft}
+                onChange={e => setProfileNameDraft(e.target.value)}
+                placeholder="卡片名称，如：日日新 / 商汤 DeepSeek"
+                className="flex-1 ui-input"
+              />
+              <button
+                type="button"
+                onClick={() => saveProviderProfile(false)}
+                disabled={!activeProfileId}
+                className="ui-btn-primary text-sm whitespace-nowrap disabled:opacity-45 disabled:cursor-not-allowed"
+                title={!activeProfileId ? '新建时请用「保存为新卡片」' : '把下方表单写回当前使用中的卡片'}
+              >
+                更新当前卡片
+              </button>
+              <button
+                type="button"
+                onClick={() => saveProviderProfile(true)}
+                className="ui-btn-secondary text-sm whitespace-nowrap"
+              >
+                保存为新卡片
+              </button>
+            </div>
+            <p className="text-[11px] text-[var(--ui-muted)] mb-1">
+              {activeProfileId
+                ? '编辑下方配置后可「更新当前卡片」；或「保存为新卡片」再加一套，已有卡片不会被清掉。'
+                : '新建模式：改 Base URL / Key / 模型后点「保存为新卡片」。点左侧旧卡片可随时切回。'}
+            </p>
+          </div>
+
           <div>
             <label className="block text-sm font-medium text-stone-700 mb-1">AI 供应商</label>
             <select 
@@ -1409,7 +1838,7 @@ export default function App() {
               {settings.provider !== 'gemini' && (
                 <button
                   onClick={handleDetectModels}
-                  disabled={isGenerating}
+                  disabled={isTaskBusy}
                   className="ui-btn-ghost text-xs disabled:opacity-50"
                 >
                   {isGenerating ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
@@ -2135,7 +2564,7 @@ export default function App() {
                           handleRegenerateChapterOutline(item.chapterNumber);
                           setTocMenuOpen(null);
                         }}
-                        disabled={isGenerating}
+                        disabled={isTaskBusy}
                         className="w-full px-3 py-2 text-sm text-left text-amber-700 hover:bg-amber-50 disabled:opacity-50"
                       >
                         重新生成
@@ -2198,7 +2627,7 @@ export default function App() {
                   </button>
                   <button
                     onClick={() => handleRegenerateChapterOutline(item.chapterNumber)}
-                    disabled={isGenerating}
+                    disabled={isTaskBusy}
                     className="px-3 py-1.5 text-xs font-medium text-amber-700 bg-amber-50 rounded-lg hover:bg-amber-100 disabled:opacity-70"
                   >
                     {isGenerating ? <Loader2 className="w-3 h-3 animate-spin" /> : '重新生成'}
@@ -2330,7 +2759,7 @@ export default function App() {
                 {!!shortStoryInfo.content && (
                   <button
                     onClick={() => handleGenerateShortStoryContent({ forceFinal: true })}
-                    disabled={isGenerating}
+                    disabled={isTaskBusy}
                     className="ui-btn-secondary disabled:opacity-70"
                   >
                     {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Feather className="w-4 h-4" />}
@@ -2366,7 +2795,7 @@ export default function App() {
                       <div className="flex flex-col gap-1 shrink-0">
                         <button
                           type="button"
-                          disabled={isGenerating}
+                          disabled={isTaskBusy}
                           onClick={() => handleGenerateShortStoryContent({ segmentIndex: idx, rewrite: seg.isGenerated })}
                           className="ui-btn-ghost text-xs disabled:opacity-50"
                         >
@@ -2469,7 +2898,7 @@ export default function App() {
                           e.stopPropagation();
                           handleGenerateChapter(item.chapterNumber);
                         }}
-                        disabled={isGenerating}
+                        disabled={isTaskBusy}
                         className="p-1 text-[var(--ui-accent-text)] hover:bg-[var(--ui-accent-soft)] rounded"
                         title="生成内容"
                       >
@@ -2523,8 +2952,8 @@ export default function App() {
                     </button>
                   </div>
                   <button
-                    onClick={isBatchGenerating ? handleStopBatchGenerate : handleBatchGenerateChapters}
-                    disabled={isGenerating && !isBatchGenerating}
+                    onClick={isBatchGenerating ? handleStopBatchGenerate : () => handleBatchGenerateChapters()}
+                    disabled={isTaskBusy && !isBatchGenerating}
                     className="ui-btn-secondary disabled:opacity-70"
                   >
                     <Play className="w-4 h-4" />
@@ -2540,7 +2969,7 @@ export default function App() {
                   )}
                   <button
                     onClick={() => handleGenerateChapter(activeChapterNum)}
-                    disabled={isGenerating}
+                    disabled={isTaskBusy}
                     className="ui-btn-primary disabled:opacity-70"
                   >
                     {isGenerating && generatingChapterNum === activeChapterNum ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
@@ -2643,7 +3072,7 @@ export default function App() {
         const text = await file.text();
         const data = JSON.parse(text);
         if (!data._version) {
-          alert('无效的备份文件！');
+          pushToast('无效的备份文件！', 'error');
           return;
         }
         if (!confirm(`确认恢复备份？\n备份时间：${data._exportTime || '未知'}\n书名：${data.bookInfo?.title || '未命名'}\n\n此操作将覆盖当前所有数据！`)) return;
@@ -2658,9 +3087,9 @@ export default function App() {
         if (data.activeChapterNum !== undefined) setActiveChapterNum(data.activeChapterNum);
         if (data.shortStoryInfo) setShortStoryInfo(data.shortStoryInfo);
         if (data.shortStoryTitleOptions) setShortStoryTitleOptions(data.shortStoryTitleOptions);
-        alert('数据恢复成功！');
+        pushToast('数据恢复成功！', 'success');
       } catch (err) {
-        alert('恢复失败：文件格式错误');
+        pushToast('恢复失败：文件格式错误', 'error');
       }
     };
     input.click();
@@ -2706,7 +3135,7 @@ export default function App() {
     });
     setShortStoryTitleOptions([]);
     setActiveTab('settings');
-    alert('已重开新书，API 设置保持不变');
+    pushToast('已重开新书，API 设置保持不变', 'success');
   };
 
   const navItems = mode === 'novel' 
@@ -2754,22 +3183,35 @@ export default function App() {
           </div>
         </div>
 
-        {mode === 'novel' && (
-          <div className="ui-progress-card hidden md:block">
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <span className="text-[11px] font-semibold text-[var(--ui-ink)]">创作进度</span>
-              <span className="text-[11px] tabular-nums text-[var(--ui-accent-text)]">
-                {[!!bookInfo.title, characters.length > 0, toc.length > 0, Object.keys(chapters).length > 0].filter(Boolean).length}/4
-              </span>
-            </div>
-            <div className="ui-progress-track">
-              <div className="ui-progress-fill" style={{ width: `${([!!bookInfo.title, characters.length > 0, toc.length > 0, Object.keys(chapters).length > 0].filter(Boolean).length / 4) * 100}%` }} />
-            </div>
-            <p className="text-[10px] leading-relaxed text-[var(--ui-muted)] mt-2">
-              {!bookInfo.title ? '下一步：选择题材并构思书名' : characters.length === 0 ? '下一步：生成人物关系' : toc.length === 0 ? '下一步：生成大纲目录' : Object.keys(chapters).length === 0 ? '下一步：开始撰写第一章' : '作品正在持续生长'}
-            </p>
+        <div className="ui-progress-card hidden md:block">
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <span className="text-[11px] font-semibold text-[var(--ui-ink)]">创作进度</span>
+            <span className="text-[11px] tabular-nums text-[var(--ui-accent-text)]">
+              {mode === 'novel' ? `${novelProgress.doneSteps}/4` : `${shortProgress.doneSteps}/4`}
+            </span>
           </div>
-        )}
+          <div className="ui-progress-track">
+            <div
+              className="ui-progress-fill"
+              style={{ width: `${Math.round((mode === 'novel' ? novelProgress.score : shortProgress.score) * 100)}%` }}
+            />
+          </div>
+          <p className="text-[10px] leading-relaxed text-[var(--ui-muted)] mt-2">
+            {mode === 'novel' ? novelProgress.nextHint : shortProgress.nextHint}
+          </p>
+          {mode === 'novel' && novelProgress.tocCount > 0 && (
+            <p className="text-[10px] text-[var(--ui-muted)] mt-1 tabular-nums">
+              目录 {novelProgress.tocCount} · 正文 {novelProgress.written}/{novelProgress.target}
+            </p>
+          )}
+          {mode === 'shortStory' && (
+            <p className="text-[10px] text-[var(--ui-muted)] mt-1 tabular-nums">
+              {shortProgress.segTotal > 0
+                ? `分段 ${shortProgress.doneSegs}/${shortProgress.segTotal} · ${shortProgress.words}/${shortProgress.target} 字`
+                : `${shortProgress.words}/${shortProgress.target} 字`}
+            </p>
+          )}
+        </div>
 
         <div className="flex-1 min-h-0 flex flex-col overflow-y-auto">
           <div className="px-3 pt-3 pb-1 hidden md:block shrink-0">
@@ -2861,19 +3303,66 @@ export default function App() {
               {activeTab === 'chapters' && (mode === 'novel' ? '章节正文' : '故事正文')}
               {activeTab === 'examples' && '范文参考'}
             </h2>
+            {taskState.status !== 'idle' && (
+              <p className={`text-[11px] mt-0.5 truncate ${taskState.status === 'error' ? 'text-red-600' : 'text-[var(--ui-muted)]'}`}>
+                {taskState.status === 'running' && (taskState.label || '任务进行中…')}
+                {taskState.status === 'error' && (taskState.lastError ? `失败：${taskState.lastError}` : '任务失败')}
+                {taskState.progress && taskState.status === 'running' && (
+                  <span className="tabular-nums"> · {taskState.progress.current}/{taskState.progress.total}</span>
+                )}
+              </p>
+            )}
           </div>
           <div className="flex-1 min-w-0" />
+          {/* 当前供应商卡片快捷切换 */}
+          {providerProfiles.length > 0 && (
+            <select
+              value={activeProfileId || ''}
+              onChange={(e) => {
+                const p = providerProfiles.find(x => x.id === e.target.value);
+                if (p) activateProviderProfile(p);
+              }}
+              className="hidden md:block text-xs ui-input !py-1 !px-2 max-w-[10rem] shrink-0"
+              title="切换供应商卡片"
+            >
+              <option value="" disabled>供应商卡片</option>
+              {providerProfiles.map(p => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          )}
           {(bookInfo.title || shortStoryInfo.title) && (
-            <span className="hidden sm:inline text-sm text-[var(--ui-muted)] truncate max-w-[14rem]">
+            <span className="hidden sm:inline text-sm text-[var(--ui-muted)] truncate max-w-[10rem]">
               {mode === 'novel' ? bookInfo.title : shortStoryInfo.title}
             </span>
           )}
           {mode === 'novel' && bookInfo.targetChapterCount > 0 && (
-            <span className="text-xs tabular-nums shrink-0 font-semibold text-[var(--ui-accent-text)] bg-[var(--ui-accent-soft)] px-2.5 py-1 rounded-full border border-[rgba(196,81,31,0.2)]">
+            <span className="text-xs tabular-nums shrink-0 font-semibold text-[var(--ui-accent-text)] bg-[var(--ui-accent-soft)] px-2.5 py-1 rounded-full border border-[var(--ui-accent)]/15">
               {Object.keys(chapters).length}/{bookInfo.targetChapterCount} 章
             </span>
           )}
-          {isGenerating && (
+          {taskState.status === 'running' && (
+            <span className="ui-status-pill shrink-0">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              {taskState.kind === 'batch' ? '批量中' : '生成中'}
+            </span>
+          )}
+          {taskState.status === 'running' && (taskState.cancellable || isBatchGenerating) && (
+            <button type="button" onClick={requestCancelTask} className="text-xs px-2 py-1 rounded-lg border border-amber-200 text-amber-800 bg-amber-50 shrink-0">
+              停止
+            </button>
+          )}
+          {taskState.status === 'error' && (
+            <button type="button" onClick={() => retryLastTask()} className="text-xs px-2 py-1 rounded-lg border border-red-200 text-red-700 bg-red-50 shrink-0">
+              重试
+            </button>
+          )}
+          {taskState.status === 'error' && (
+            <button type="button" onClick={clearTask} className="text-xs text-[var(--ui-muted)] shrink-0">
+              清除
+            </button>
+          )}
+          {isGenerating && taskState.status === 'idle' && (
             <span className="ui-status-pill shrink-0">
               <Loader2 className="w-3 h-3 animate-spin" />
               生成中
@@ -2890,6 +3379,33 @@ export default function App() {
           {activeTab === 'chapters' && renderChapters()}
           {activeTab === 'examples' && renderExamples()}
         </main>
+      </div>
+
+      <div className="fixed bottom-4 right-4 z-[80] flex flex-col gap-2 max-w-sm w-[min(100vw-2rem,22rem)] pointer-events-none">
+        {toasts.map(t => (
+          <div
+            key={t.id}
+            className={`pointer-events-auto ui-form-card !p-3 shadow-lg border ${
+              t.kind === 'error' ? 'border-red-200' :
+              t.kind === 'success' ? 'border-emerald-200' :
+              t.kind === 'warn' ? 'border-amber-200' : 'border-[var(--ui-line)]'
+            }`}
+          >
+            <div className="flex items-start gap-2">
+              <p className="text-sm text-[var(--ui-ink)] flex-1 leading-snug">{t.message}</p>
+              <button type="button" className="text-[var(--ui-muted)] text-xs shrink-0" onClick={() => dismissToast(t.id)}>关闭</button>
+            </div>
+            {t.actionTab && t.actionLabel && (
+              <button
+                type="button"
+                className="mt-2 text-xs font-semibold text-[var(--ui-accent-text)]"
+                onClick={() => { setActiveTab(t.actionTab!); dismissToast(t.id); }}
+              >
+                {t.actionLabel} →
+              </button>
+            )}
+          </div>
+        ))}
       </div>
     </div>
   );
