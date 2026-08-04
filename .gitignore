@@ -76,3 +76,12 @@ uploads/
 
 # TypeScript
 *.tsbuildinfo
+src/_archive_bak/
+src/**/*.bak*
+*.bak-*
+
+# one-off patch scripts (do not reintroduce)
+/fix_*.js
+/extract.js
+/test_patch.js
+/safe_replace.js

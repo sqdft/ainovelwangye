@@ -1,7 +1,7 @@
 {
-  "name": "react-example",
+  "name": "ai-novel2",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite --port=3033 --host=0.0.0.0",

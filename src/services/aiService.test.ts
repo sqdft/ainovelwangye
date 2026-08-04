@@ -40,7 +40,8 @@ assert.deepEqual(
   [1, 2]
 );
 
-assert.throws(() =>
+// 重复标题被跳过，只保留有效章（不再整批 throw）
+assert.deepEqual(
   validateTOC(
     {
       chapters: [
@@ -51,24 +52,30 @@ assert.throws(() =>
     1,
     2,
     ['重复标题']
-  )
+  ).map(item => item.chapterNumber),
+  [2]
 );
 
-assert.throws(
-  () =>
-    validateTOC(
-      {
-        chapters: [
-          { chapterNumber: 20, title: '最后的决战', summary: '过早使用结局感标题。' },
-        ],
-      },
-      20,
-      20,
-      [],
-      100
-    ),
-  /标题节奏不合理/
-);
+// 过早结局感标题：自动软改写并保留，不 throw；中性隐喻标题保留
+{
+  const fixed = validateTOC(
+    {
+      chapters: [
+        { chapterNumber: 20, title: '最后的决战', summary: '过早使用结局感标题。' },
+        { chapterNumber: 13, title: '没有终点站', summary: '中期推进，隐喻前路。' },
+      ],
+    },
+    13,
+    20,
+    [],
+    100
+  );
+  assert.equal(fixed.length, 2);
+  const titles = fixed.map(x => x.title);
+  assert.ok(!titles.includes('最后的决战'), '决战类应被改写');
+  assert.ok(titles.includes('没有终点站'), '中性隐喻标题应保留');
+  assert.ok(((fixed as any).__sanitizedNotes || []).length >= 1);
+}
 
 assert.equal(
   validateTOC(

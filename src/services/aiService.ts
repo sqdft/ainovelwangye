@@ -3,6 +3,17 @@ import { Settings, BookInfo, Character, TOCItem, ShortStoryInfo, StorySegment, R
 import { getThemePrompt } from "../config/themes";
 import { normalizeBaseUrl, proxyFetch } from '../lib/devProxy';
 
+export type ChapterGenMode = 'write' | 'continue' | 'expand' | 'conclude' | 'rewrite';
+
+export type ChapterGenOptions = {
+  mode?: ChapterGenMode;
+  directive?: string;
+  existingContent?: string;
+  signal?: AbortSignal;
+  onChunk?: (fullText: string) => void;
+};
+
+
 function extractJSON(text: string): any {
   // 提取JSON文本
   let jsonStr = text;
@@ -53,7 +64,7 @@ function cleanText(value: any): string {
 }
 
 const FINAL_ONLY_TITLE_PATTERN = /(大结局|最终章|终章|尾声|完结|结局篇|全书终)/;
-const EARLY_ENDING_TITLE_PATTERN = /(大结局|最终章|终章|尾声|完结|结局篇|全书终|终局|最终|最后一战|最后的决战|落幕|归宿|终点|终焉|谢幕|尘埃落定|一切终结)/;
+const EARLY_ENDING_TITLE_PATTERN = /(大结局|最终章|终章|尾声|完结|结局篇|全书终|终局|最后一战|最后的决战|落幕|归宿|终焉|谢幕|尘埃落定|一切终结)/;
 
 function getClosingTitleStart(targetChapterCount: number): number {
   const closingWindow = Math.max(5, Math.ceil(targetChapterCount * 0.05));
@@ -71,6 +82,27 @@ function getEndingTitleIssue(title: string, chapterNumber: number, targetChapter
   }
 
   return undefined;
+}
+
+/** 把过早结局感标题改成中性推进标题，避免整批目录作废 */
+function sanitizeEndingTitle(title: string, chapterNumber: number): string {
+  let t = title;
+  t = t
+    .replace(/大结局|最终章|终章|尾声|完结篇?|结局篇|全书终/g, '转折')
+    .replace(/终局|最后一战|最后的决战/g, '决战前夜')
+    .replace(/落幕|归宿|终焉|谢幕|尘埃落定|一切终结/g, '变局')
+    .replace(/最终(?!章)/g, '关键')
+    .replace(/终点站?/g, '中途站')
+    .replace(/没有终点/g, '前路未尽');
+  t = t.replace(/^[·\-—\s]+|[·\-—\s]+$/g, '').trim();
+  if (!t || t === title) {
+    t = `第${chapterNumber}章·暗流`;
+  }
+  // 避免 sanitize 后仍触发
+  if (EARLY_ENDING_TITLE_PATTERN.test(t) || FINAL_ONLY_TITLE_PATTERN.test(t)) {
+    t = `暗流涌动·${chapterNumber}`;
+  }
+  return t;
 }
 
 function validateBookTitles(data: any): Array<{ title: string; intro: string }> {
@@ -143,20 +175,31 @@ function validateTOC(
   const titleSet = new Set(existingTitles.map(title => title.trim()));
   const summaryPool = existingSummaries.map(s => cleanText(s)).filter(Boolean);
   const byChapter = new Map<number, TOCItem>();
-  const invalidTitleIssues: string[] = [];
+  const sanitizedNotes: string[] = [];
 
   ensureArray<any>(data?.chapters, 'chapters').forEach(item => {
     const chapterNumber = Number(item?.chapterNumber);
-    const title = cleanText(item?.title);
+    let title = cleanText(item?.title);
     const summary = cleanText(item?.summary);
     if (!Number.isInteger(chapterNumber) || chapterNumber < startIndex || chapterNumber > endIndex) return;
-    if (!title || !summary || titleSet.has(title)) return;
+    if (!title || !summary) return;
     if (summaryPool.some(prev => summaryTooSimilar(summary, prev))) return;
+
     const endingTitleIssue = getEndingTitleIssue(title, chapterNumber, targetChapterCount);
     if (endingTitleIssue) {
-      invalidTitleIssues.push(endingTitleIssue);
-      return;
+      // 软处理：自动改标题并保留本章，绝不因一条标题毁掉整批
+      const fixed = sanitizeEndingTitle(title, chapterNumber);
+      let unique = fixed;
+      let n = 2;
+      while (titleSet.has(unique)) {
+        unique = `${fixed}·${n++}`;
+      }
+      sanitizedNotes.push(`第${chapterNumber}章「${title}」→「${unique}」（避免过早结局感）`);
+      title = unique;
     }
+
+    if (titleSet.has(title)) return;
+
     if (!byChapter.has(chapterNumber)) {
       byChapter.set(chapterNumber, { chapterNumber, title, summary });
       titleSet.add(title);
@@ -165,13 +208,8 @@ function validateTOC(
   });
 
   const chapters = Array.from(byChapter.values()).sort((a, b) => a.chapterNumber - b.chapterNumber);
-  const expectedCount = endIndex - startIndex + 1;
-  if (chapters.length !== expectedCount) {
-    if (invalidTitleIssues.length > 0) {
-      throw new Error(`AI 返回的目录标题节奏不合理：${invalidTitleIssues[0]}，请重试。`);
-    }
-    throw new Error(`AI 返回的目录不完整：期望 ${expectedCount} 章，实际有效 ${chapters.length} 章，请重试。`);
-  }
+  // 附带软改写说明（供上层 toast；不抛错）
+  (chapters as any).__sanitizedNotes = sanitizedNotes;
   return chapters;
 }
 
@@ -222,7 +260,8 @@ async function callOpenAIWithKey(
   prompt: string, 
   settings: Settings, 
   apiKey: string,
-  expectJSON: boolean
+  expectJSON: boolean,
+  opts?: { signal?: AbortSignal; stream?: boolean; onChunk?: (fullText: string) => void }
 ): Promise<{ success: boolean; content?: string; error?: string; isAuthError?: boolean }> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json'
@@ -237,6 +276,9 @@ async function callOpenAIWithKey(
     messages,
     temperature: settings.temperature || 0.9
   };
+  if (opts?.stream && !expectJSON) {
+    body.stream = true;
+  }
 
   if (expectJSON) {
     messages[0].content += "\n\n请务必返回合法的 JSON 格式对象，不要包含任何其他文字或 Markdown 标记。";
@@ -246,7 +288,8 @@ async function callOpenAIWithKey(
     const res = await proxyFetch(`${normalizeBaseUrl(settings.baseUrl)}/chat/completions`, {
       method: 'POST',
       headers,
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: opts?.signal,
     });
 
     // 检查是否是认证错误（401/403），这类错误可以尝试下一个密钥
@@ -258,6 +301,44 @@ async function callOpenAIWithKey(
     if (!res.ok) {
       const err = await res.text();
       return { success: false, error: `API 请求失败 (${res.status}): ${err}` };
+    }
+
+    if (opts?.stream && !expectJSON && res.body) {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let full = '';
+      let buffer = '';
+      while (true) {
+        if (opts.signal?.aborted) {
+          try { await reader.cancel(); } catch { /* ignore */ }
+          throw new DOMException('Aborted', 'AbortError');
+        }
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n');
+        buffer = parts.pop() || '';
+        for (const rawLine of parts) {
+          const line = rawLine.trim();
+          if (!line.startsWith('data:')) continue;
+          const dataStr = line.slice(5).trim();
+          if (!dataStr || dataStr === '[DONE]') continue;
+          try {
+            const json = JSON.parse(dataStr);
+            const delta = json.choices?.[0]?.delta?.content;
+            if (typeof delta === 'string' && delta) {
+              full += delta;
+              opts.onChunk?.(full);
+            }
+            const msg = json.choices?.[0]?.message?.content;
+            if (typeof msg === 'string' && msg && !delta) {
+              full = msg;
+              opts.onChunk?.(full);
+            }
+          } catch { /* skip */ }
+        }
+      }
+      return { success: true, content: full };
     }
 
     const data = await res.json();
@@ -276,11 +357,14 @@ async function callOpenAIWithKey(
     
     return { success: true, content: data.choices[0].message.content || "" };
   } catch (e: any) {
+    if (e?.name === 'AbortError') {
+      return { success: false, error: '已取消' };
+    }
     return { success: false, error: e.message || '网络请求失败' };
   }
 }
 
-async function callAI(prompt: string, settings: Settings, expectJSON: boolean = false): Promise<string> {
+async function callAI(prompt: string, settings: Settings, expectJSON: boolean = false, opts?: { signal?: AbortSignal; stream?: boolean; onChunk?: (fullText: string) => void }): Promise<string> {
   if (settings.provider === 'gemini') {
     const ai = new GoogleGenAI({ apiKey: settings.apiKey || process.env.GEMINI_API_KEY });
     const config: any = { temperature: settings.temperature || 0.9 };
@@ -367,7 +451,7 @@ async function callAI(prompt: string, settings: Settings, expectJSON: boolean = 
         continue;
       }
       
-      const result = await callOpenAIWithKey(prompt, settings, apiKey, expectJSON);
+      const result = await callOpenAIWithKey(prompt, settings, apiKey, expectJSON, opts);
       
       if (result.success && result.content !== undefined) {
         // 成功，将该密钥从失败列表中移除
@@ -649,9 +733,85 @@ ${pacingInstruction}
 - summary (字符串): 本章详细剧情摘要（约100-150字，必须推进新事件，禁止与已有章节摘要高度相似或复述同一线索）
 不要输出其他任何解释性文字。`;
 
-  const responseText = await callAI(prompt, settings, true);
-  const data = extractJSON(responseText);
-  return validateTOC(data, startIndex, endIndex, existingTitles, bookInfo.targetChapterCount, existingSummaries);
+  const expectedCount = endIndex - startIndex + 1;
+  let merged: TOCItem[] = [];
+  let titlesPool = [...existingTitles];
+  let summaryPool = [...existingSummaries];
+  const allSanitized: string[] = [];
+  const maxAttempts = 3;
+
+  let lastError = '';
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const missing: number[] = [];
+    for (let n = startIndex; n <= endIndex; n++) {
+      if (!merged.some(c => c.chapterNumber === n)) missing.push(n);
+    }
+    if (missing.length === 0) break;
+
+    // 首轮用全批 prompt；后续只补缺号（缩小范围，避免整批重来）
+    let attemptPrompt = prompt;
+    if (attempt > 1) {
+      const missStart = missing[0];
+      const missEnd = missing[missing.length - 1];
+      attemptPrompt = `请只补全以下缺失章节号的目录（不要输出已有章）：${missing.join('、')}。
+范围提示：第 ${missStart}–${missEnd} 章附近。书名：${bookInfo.title}。
+【硬性】第 ${getClosingTitleStart(bookInfo.targetChapterCount)} 章之前标题禁止结局性词汇（大结局/终章/尾声/完结/最后一战等）。
+已有标题勿重复：${titlesPool.slice(-40).join(' | ')}
+严格 JSON：{"chapters":[{"chapterNumber":n,"title":"...","summary":"100-150字"}]}`;
+    }
+
+    try {
+      const responseText = await callAI(attemptPrompt, settings, true);
+      const data = extractJSON(responseText);
+      const batch = validateTOC(
+        data,
+        attempt === 1 ? startIndex : Math.min(...missing),
+        attempt === 1 ? endIndex : Math.max(...missing),
+        titlesPool,
+        bookInfo.targetChapterCount,
+        summaryPool
+      );
+      const notes = (batch as any).__sanitizedNotes as string[] | undefined;
+      if (notes?.length) allSanitized.push(...notes);
+
+      for (const ch of batch) {
+        if (ch.chapterNumber < startIndex || ch.chapterNumber > endIndex) continue;
+        if (merged.some(m => m.chapterNumber === ch.chapterNumber)) continue;
+        merged.push(ch);
+        titlesPool.push(ch.title);
+        summaryPool.push(ch.summary);
+      }
+    } catch (e: any) {
+      // 单次请求/解析失败：保留已 merge 的章节，继续尝试或返回部分结果
+      lastError = e?.message || String(e);
+      console.warn(`generateTOC attempt ${attempt} failed, keep ${merged.length} chapters:`, lastError);
+      if (merged.length > 0) {
+        // 已有成果则不再无意义重试整批推倒，仅再补缺一轮
+        continue;
+      }
+      if (attempt === maxAttempts) break;
+    }
+  }
+
+  merged = merged.sort((a, b) => a.chapterNumber - b.chapterNumber);
+  if (merged.length === 0) {
+    throw new Error(
+      lastError
+        ? `目录生成本批未收下任何章：${lastError}。已有目录不会被清空，请重试。`
+        : 'AI 返回的目录全部无效（空/重复/摘要撞车），请重试本批。已生成的目录不会被清空。'
+    );
+  }
+
+  // 把软改写说明挂到结果上，供 UI toast（不阻断）
+  (merged as any).__sanitizedNotes = allSanitized;
+  (merged as any).__partial =
+    merged.length < expectedCount
+      ? `本批期望 ${expectedCount} 章，已收下 ${merged.length} 章（缺号可再点「继续生成/补缺目录」补齐）`
+      : '';
+  if (lastError && merged.length < expectedCount) {
+    (merged as any).__partial += `；中途有一次请求失败已忽略`;
+  }
+  return merged;
 }
 
 export async function generateChapterContent(
@@ -662,7 +822,8 @@ export async function generateChapterContent(
   settings: Settings,
   toc: TOCItem[],
   realmProgress?: RealmProgress,
-  novelMemory?: NovelMemory
+  novelMemory?: NovelMemory,
+  genOpts?: ChapterGenOptions
 ): Promise<string> {
   const charsStr = characters.map(c => `- ${c.name} (${c.role}): ${c.description}`).join('\n');
   
@@ -772,7 +933,28 @@ ${tocItem.summary}
     prompt += `--- 上一章结尾 ---\n...${lastChapter.slice(-500)}\n`;
   }
 
-  const responseText = await callAI(prompt, settings, false);
+  const mode = genOpts?.mode || 'write';
+  const existing = (genOpts?.existingContent || '').trim();
+  if (mode === 'continue' && existing) {
+    prompt += `\n\n【任务：续写】\n以下是本章已有正文，请从结尾自然续写，不要重复已有内容。优先输出完整可读的一章。\n--- 已有正文（尾部） ---\n${existing.slice(-2500)}\n`;
+  } else if (mode === 'expand' && existing) {
+    prompt += `\n\n【任务：扩写】\n在保持剧情与人设不变的前提下丰富细节与对话，直接输出扩写后的完整本章正文。\n--- 原文 ---\n${existing}\n`;
+  } else if (mode === 'conclude' && existing) {
+    prompt += `\n\n【任务：收束本章】\n在已有正文基础上完成本章收束，解决本章冲突，不要新开超大主线。直接输出完整本章正文。\n--- 原文 ---\n${existing}\n`;
+  } else if (mode === 'rewrite') {
+    const dir = (genOpts?.directive || '').trim();
+    prompt += `\n\n【任务：定向改写】\n按下列要求改写本章，保留主线与人物一致，直接输出完整正文。\n要求：${dir || '按本章摘要重写，提升连贯与文笔。'}\n`;
+    if (existing) prompt += `--- 原文（可参考） ---\n${existing.slice(0, 4000)}\n`;
+  }
+  if (genOpts?.directive && mode !== 'rewrite') {
+    prompt += `\n\n【额外要求】${genOpts.directive}\n`;
+  }
+
+  const responseText = await callAI(prompt, settings, false, {
+    signal: genOpts?.signal,
+    stream: !!genOpts?.onChunk,
+    onChunk: genOpts?.onChunk,
+  });
   return responseText.trim();
 }
 

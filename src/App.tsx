@@ -1,45 +1,52 @@
 import { useState, useEffect, useRef } from 'react';
-import { BookOpen, Settings as SettingsIcon, Users, List, FileText, Download, Loader2, Wand2, Play, Feather, RefreshCw, Globe, Upload, MoreHorizontal, ChevronDown, Eye, Pencil, LayoutList, Rows3, Search } from 'lucide-react';
+import {
+  BookOpen,
+  Settings as SettingsIcon,
+  Users,
+  List,
+  FileText,
+  Download,
+  Loader2,
+  Wand2,
+  Play,
+  Feather,
+  RefreshCw,
+  Globe,
+  Upload,
+  MoreHorizontal,
+  ChevronDown,
+  Eye,
+  Pencil,
+  LayoutList,
+  Rows3,
+  Search
+} from 'lucide-react';
 import { Settings, BookInfo, Character, TOCItem, Provider, ShortStoryInfo, Realm, SubRealm, RealmProgress, ModelInfo, NovelMemory, ProviderProfile } from './types';
 import { dualGet, dualSet, dualClearAll } from './lib/storage';
+import { useTaskRunner, settingsReady } from './orchestration';
+import { SettingsPanel } from './features/settings';
+import { ChaptersPanel } from './features/chapters';
+import { BookPanel } from './features/book';
+import { CharactersPanel } from './features/characters';
+import { RealmsPanel } from './features/realms';
+import { TocPanel } from './features/toc';
+import { ExamplesPanel } from './features/examples';
+import { DownstreamConfirmModal, type DownstreamConfirmState } from './components/DownstreamConfirmModal';
+import { MemoryPanel } from './features/memory';
+import type { DownstreamLevel } from './orchestration';
+
+import { AppHeader, AppSidebar, ToastStack, type ToastItem as LayoutToastItem } from './components/layout';
 import { normalizeBaseUrl, proxyFetch } from './lib/devProxy';
-import { generateBookInfo, generateCharacters, generateRealms, generateTOC, generateChapterContent, generateShortStoryContent, generateShortStoryTitles, generateShortStoryOutlineFromTitle, generateShortStorySegments, generateBookTitles, updateNovelMemory } from './services/aiService';
+import { generateBookInfo, generateCharacters, generateRealms, generateTOC, generateChapterContent, generateShortStoryContent, generateShortStoryTitles, generateShortStoryOutlineFromTitle, generateShortStorySegments, generateBookTitles, updateNovelMemory, type ChapterGenOptions } from './services/aiService';
 import { PROVIDERS, getProviderConfig } from './config/providers';
 import { MALE_THEME_NAMES, FEMALE_THEME_NAMES, SHORT_STORY_THEME_NAMES } from './config/themes';
-import { Document, Paragraph, TextRun, HeadingLevel, AlignmentType, Packer } from 'docx';
 import { saveAs } from 'file-saver';
 
-type Tab = 'settings' | 'book' | 'characters' | 'realms' | 'toc' | 'chapters' | 'examples';
+type Tab = 'settings' | 'book' | 'characters' | 'realms' | 'toc' | 'chapters' | 'examples' | 'memory';
 type Mode = 'novel' | 'shortStory';
 
 type ToastKind = 'info' | 'success' | 'error' | 'warn';
 type ToastItem = { id: number; kind: ToastKind; message: string; actionLabel?: string; actionTab?: Tab };
-
-type TaskKind =
-  | 'idle'
-  | 'models'
-  | 'titles'
-  | 'bookInfo'
-  | 'characters'
-  | 'realms'
-  | 'toc'
-  | 'chapter'
-  | 'batch'
-  | 'shortTitles'
-  | 'shortOutline'
-  | 'shortContent'
-  | 'other';
-
-type TaskStatus = 'idle' | 'running' | 'error';
-
-type TaskState = {
-  kind: TaskKind;
-  label: string;
-  status: TaskStatus;
-  progress?: { current: number; total: number };
-  cancellable?: boolean;
-  lastError?: string;
-};
 
 
 
@@ -159,181 +166,27 @@ function useDualStorage<T>(key: string, initialValue: T): [T, (value: T | ((val:
   return [loaded ? storedValue : initialValue, setValue];
 }
 
-const ThemeSelector = ({ 
-  selectedThemes, 
-  onChange,
-  type = 'novel'
-}: { 
-  selectedThemes: string[], 
-  onChange: (themes: string[]) => void,
-  type?: 'novel' | 'shortStory'
-}) => {
-  const [gender, setGender] = useState<'male' | 'female'>('male');
-  const [showAll, setShowAll] = useState(false);
-  const [themeQuery, setThemeQuery] = useState('');
-  
-  // 防御性检查：确保 selectedThemes 是数组
-  const safeSelectedThemes = Array.isArray(selectedThemes) ? selectedThemes : [];
-  const availableThemes = type === 'shortStory' ? SHORT_STORY_THEME_NAMES : (gender === 'male' ? MALE_THEME_NAMES : FEMALE_THEME_NAMES);
-  // 防御性检查：确保 availableThemes 是数组
-  const safeAvailableThemes = Array.isArray(availableThemes) ? availableThemes : [];
-  const q = themeQuery.trim().toLowerCase();
-  const filteredThemes = q
-    ? safeAvailableThemes.filter((t) => t.toLowerCase().includes(q))
-    : safeAvailableThemes;
-  const displayThemes = q || showAll ? filteredThemes : filteredThemes.slice(0, 15);
-
-  // 当切换男女频时，清空已选主题
-  const handleGenderChange = (newGender: 'male' | 'female') => {
-    setGender(newGender);
-    onChange([]); // 切换时清空选择
-  };
-
-  return (
-    <div>
-      {type === 'novel' && (
-        <div className="flex items-center gap-2 mb-3">
-          <button
-            onClick={() => handleGenderChange('male')}
-            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-              gender === 'male'
-                ? 'bg-blue-100 text-blue-700 border border-blue-200'
-                : 'bg-stone-50 text-stone-600 border border-stone-200 hover:bg-stone-100'
-            }`}
-          >
-            男频
-          </button>
-          <button
-            onClick={() => handleGenderChange('female')}
-            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-              gender === 'female'
-                ? 'bg-pink-100 text-pink-700 border border-pink-200'
-                : 'bg-stone-50 text-stone-600 border border-stone-200 hover:bg-stone-100'
-            }`}
-          >
-            女频
-          </button>
-          <span className="text-xs text-[var(--ui-muted)] ml-2">
-            已选 {safeSelectedThemes.length}/5 个主题
-          </span>
-        </div>
-      )}
-      
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
-        <label className="block text-sm font-medium text-stone-700">
-          主题 {type === 'shortStory' && '(可多选，最多5个)'}
-          <span className="ml-2 text-xs font-normal text-[var(--ui-muted)]">
-            {q ? `匹配 ${filteredThemes.length}` : `共 ${safeAvailableThemes.length}`} 个
-          </span>
-        </label>
-        <div className="flex items-center gap-2">
-          <div className="relative">
-            <Search className="w-3.5 h-3.5 text-[var(--ui-muted)] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-            <input
-              type="search"
-              value={themeQuery}
-              onChange={(e) => setThemeQuery(e.target.value)}
-              placeholder="搜索主题…"
-              className="ui-input !py-1.5 !pl-8 !pr-2 text-xs w-40 sm:w-48"
-            />
-          </div>
-          {!q && safeAvailableThemes.length > 15 && (
-            <button
-              type="button"
-              onClick={() => setShowAll(!showAll)}
-              className="text-xs text-[var(--ui-accent-text)] hover:text-[var(--ui-accent-text)] font-medium whitespace-nowrap"
-            >
-              {showAll ? '收起' : '展示全部'}
-            </button>
-          )}
-        </div>
-      </div>
-      
-      <div className="flex flex-wrap gap-2 max-h-48 overflow-y-auto p-0.5">
-        {displayThemes.map(theme => {
-          const isSelected = safeSelectedThemes.includes(theme);
-          return (
-            <button
-              key={theme}
-              onClick={() => {
-                if (isSelected) {
-                  onChange(safeSelectedThemes.filter(t => t !== theme));
-                } else {
-                  if (safeSelectedThemes.length < 5) onChange([...safeSelectedThemes, theme]);
-                  else pushToast('最多只能选择5个主题', 'warn');
-                }
-              }}
-              className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
-                isSelected 
-                  ? gender === 'female' && type !== 'shortStory'
-                    ? 'bg-pink-100 text-pink-700 border border-pink-200'
-                    : 'bg-[var(--ui-accent-soft)] text-[var(--ui-accent-text)] border border-[rgba(196,92,38,0.35)]'
-                  : 'bg-stone-50 text-stone-600 border border-stone-200 hover:bg-stone-100'
-              }`}
-            >
-              {theme}
-            </button>
-          );
-        })}
-      </div>
-      {displayThemes.length === 0 && (
-        <p className="text-xs text-[var(--ui-muted)] py-3 text-center border border-dashed border-stone-200 rounded-lg mt-1">
-          没有匹配「{themeQuery}」的主题，换个关键词试试（主题表未删减）
-        </p>
-      )}
-      
-      {safeSelectedThemes.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-2">
-          <span className="text-xs text-[var(--ui-muted)]">已选:</span>
-          {safeSelectedThemes.map(theme => (
-            <span 
-              key={theme} 
-              className={`px-2 py-0.5 rounded text-xs ${
-                gender === 'female' && type !== 'shortStory'
-                  ? 'bg-pink-50 text-pink-700'
-                  : 'bg-[var(--ui-accent-soft)] text-[var(--ui-accent-text)]'
-              }`}
-            >
-              {theme}
-              <button 
-                onClick={() => onChange(safeSelectedThemes.filter(t => t !== theme))}
-                className="ml-1 hover:text-red-500"
-              >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-};
 
 export default function App() {
   const [mode, setMode] = useDualStorage<Mode>('ai_novel_mode', 'novel');
   const [activeTab, setActiveTab] = useDualStorage<Tab>('ai_novel_activeTab', 'settings');
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [generatingChapterNum, setGeneratingChapterNum] = useState<number | null>(null);
-  const [isBatchGenerating, setIsBatchGenerating] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [showDownloadMenu, setShowDownloadMenu] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [batchFailedChapters, setBatchFailedChapters] = useState<number[]>([]);
   const [chapterQualityNotes, setChapterQualityNotes] = useState<Record<number, string[]>>({});
+  const [downstreamConfirm, setDownstreamConfirm] = useState<DownstreamConfirmState>(null);
+  const [memoryEditable, setMemoryEditable] = useState(false);
   const toastIdRef = useRef(0);
-  const [taskState, setTaskState] = useState<TaskState>({ kind: 'idle', label: '', status: 'idle' });
   const [providerProfiles, setProviderProfiles] = useDualStorage<ProviderProfile[]>('ai_novel_provider_profiles', []);
   const [activeProfileId, setActiveProfileId] = useDualStorage<string | null>('ai_novel_active_profile_id', null);
   const [profileNameDraft, setProfileNameDraft] = useState('');
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
-  const lastRetryRef = useRef<null | (() => Promise<void>)>(null);
-  const cancelTaskRef = useRef(false);
 
   const [tocCompact, setTocCompact] = useState(true);
   const [tocMenuOpen, setTocMenuOpen] = useState<number | null>(null);
   const [chapterReadMode, setChapterReadMode] = useState(true);
   const [showShortResetMenu, setShowShortResetMenu] = useState(false);
-  const stopBatchRef = useRef(false);
 
   const pushToast = (
     message: string,
@@ -360,82 +213,33 @@ export default function App() {
     setToasts(prev => prev.filter(t => t.id !== id));
   };
 
-  const isTaskBusy = taskState.status === 'running' || isGenerating || isBatchGenerating;
-
-  const clearTask = () => {
-    setTaskState({ kind: 'idle', label: '', status: 'idle' });
-    lastRetryRef.current = null;
+  const {
+    taskState,
+    setTaskState,
+    patchTaskProgress,
+    isGenerating,
+    setIsGenerating,
+    isBatchGenerating,
+    setIsBatchGenerating,
+    generatingChapterNum,
+    setGeneratingChapterNum,
+    isTaskBusy,
+    cancelTaskRef,
+    abortControllerRef,
+    stopBatchRef,
+    runTask,
+    retryLastTask,
+    requestCancelTask,
+    clearTask,
+  } = useTaskRunner(pushToast);
+  const ensureSettingsReady = () => {
+    const r = settingsReady(settings);
+    if (r.ok) return true;
+    pushToast(r.reason || '请先完善 API 设置', 'warn', { label: '去设置', tab: 'settings' });
+    setActiveTab('settings');
+    return false;
   };
 
-  const requestCancelTask = () => {
-    cancelTaskRef.current = true;
-    stopBatchRef.current = true;
-    pushToast('已请求停止…', 'warn');
-  };
-
-  const runTask = async (opts: {
-    kind: TaskKind;
-    label: string;
-    cancellable?: boolean;
-    progress?: { current: number; total: number };
-    run: () => Promise<void>;
-  }) => {
-    if (taskState.status === 'running' || isGenerating) {
-      pushToast('当前有任务进行中，请稍候或先停止', 'warn');
-      return;
-    }
-    cancelTaskRef.current = false;
-    const retryFn = async () => {
-      await runTask(opts);
-    };
-    lastRetryRef.current = retryFn;
-    setTaskState({
-      kind: opts.kind,
-      label: opts.label,
-      status: 'running',
-      progress: opts.progress,
-      cancellable: opts.cancellable,
-    });
-    setIsGenerating(true);
-    try {
-      await opts.run();
-      if (cancelTaskRef.current) {
-        setTaskState({
-          kind: opts.kind,
-          label: opts.label,
-          status: 'error',
-          lastError: '已取消',
-          cancellable: opts.cancellable,
-        });
-        pushToast('任务已取消', 'warn');
-      } else {
-        clearTask();
-      }
-    } catch (error: any) {
-      const msg = error?.message || String(error) || '未知错误';
-      setTaskState({
-        kind: opts.kind,
-        label: opts.label,
-        status: 'error',
-        lastError: msg,
-        progress: opts.progress,
-        cancellable: opts.cancellable,
-      });
-      pushToast(msg, 'error');
-    } finally {
-      setIsGenerating(false);
-      setIsBatchGenerating(false);
-      setGeneratingChapterNum(null);
-    }
-  };
-
-  const retryLastTask = async () => {
-    if (lastRetryRef.current) {
-      await lastRetryRef.current();
-    } else {
-      pushToast('没有可重试的任务', 'warn');
-    }
-  };
 
   const settingsFromProfile = (p: ProviderProfile): Settings => ({
     ...settings,
@@ -801,57 +605,90 @@ export default function App() {
     setNovelMemory(emptyNovelMemory);
   };
 
-  const confirmAndClearNovelDownstream = (message: string, level: 'book' | 'toc' | 'chapters') => {
-    if (!hasNovelDownstreamData()) return true;
-    if (!confirm(message)) return false;
+  const requestClearDownstream = (
+    title: string,
+    preferredLevel: DownstreamLevel,
+    apply: () => void,
+    detail?: string
+  ) => {
+    if (!hasNovelDownstreamData()) {
+      apply();
+      return;
+    }
+    setDownstreamConfirm({ title, detail, preferredLevel, apply });
+  };
+
+  const resolveDownstreamConfirm = (level: DownstreamLevel) => {
+    if (!downstreamConfirm) return;
+    const { apply } = downstreamConfirm;
+    setDownstreamConfirm(null);
     clearNovelDownstream(level);
-    return true;
+    apply();
   };
 
   const handleLengthChange = (lengthType: string) => {
-    if (!confirmAndClearNovelDownstream('修改篇幅会影响目录、境界推进和已生成正文。是否清空这些下游内容？', 'toc')) {
-      return;
-    }
-    const count = LENGTHS.find(l => l.value === lengthType)?.count || 100;
-    setBookInfo({ ...bookInfo, lengthType, targetChapterCount: count });
+    requestClearDownstream(
+      '修改篇幅会影响后续生成内容，请选择要清空的范围。',
+      'toc',
+      () => {
+        const count = LENGTHS.find(l => l.value === lengthType)?.count || 100;
+        setBookInfo({ ...bookInfo, lengthType, targetChapterCount: count });
+      },
+      '建议至少清空目录与正文，以免篇幅与目录不一致。'
+    );
   };
 
   const handleBookThemesChange = (themes: string[]) => {
-    if (!confirmAndClearNovelDownstream('修改主题会影响书籍设定、人物、目录和正文。是否清空这些下游内容？', 'book')) {
-      return;
-    }
-    const realmMode = themesRecommendRealms(themes);
-    setBookInfo({
-      ...bookInfo,
-      themes,
-      titleOptions: [],
-      isTitleSelected: false,
-      title: '',
-      outline: '',
-      worldbuilding: '',
-      enableRealms: realmMode === 'recommend',
-    });
-    if (realmMode !== 'recommend') {
-      setRealmProgress({ realms: [], protagonistCurrentRealmIndex: 0, protagonistCurrentSubRealmIndex: 0, chapterRealmMap: {} });
-    }
+    requestClearDownstream(
+      '修改主题会影响书籍设定与下游内容，请选择清理范围。',
+      'book',
+      () => {
+        const realmMode = themesRecommendRealms(themes);
+        setBookInfo({
+          ...bookInfo,
+          themes,
+          titleOptions: [],
+          isTitleSelected: false,
+          title: '',
+          outline: '',
+          worldbuilding: '',
+          enableRealms: realmMode === 'recommend',
+        });
+        if (realmMode !== 'recommend') {
+          setRealmProgress({ realms: [], protagonistCurrentRealmIndex: 0, protagonistCurrentSubRealmIndex: 0, chapterRealmMap: {} });
+        }
+      }
+    );
   };
 
   const handleBookTitleInput = (title: string) => {
-    if (title !== bookInfo.title && !confirmAndClearNovelDownstream('修改书名会影响人物、目录和正文。是否清空这些下游内容？', 'book')) {
+    if (title === bookInfo.title) {
+      setBookInfo({ ...bookInfo, title, isTitleSelected: !!title });
       return;
     }
-    setBookInfo({...bookInfo, title, isTitleSelected: !!title});
+    requestClearDownstream(
+      '修改书名会影响人物、目录和正文，请选择清理范围。',
+      'book',
+      () => setBookInfo({ ...bookInfo, title, isTitleSelected: !!title })
+    );
   };
 
   const handleBookPlanningFieldChange = (field: 'outline' | 'worldbuilding', value: string) => {
-    if (value !== bookInfo[field] && !confirmAndClearNovelDownstream('修改大纲或世界观会影响人物、目录和正文。是否清空这些下游内容？', 'book')) {
+    if (value === bookInfo[field]) {
+      setBookInfo({ ...bookInfo, [field]: value });
       return;
     }
-    setBookInfo({ ...bookInfo, [field]: value });
+    requestClearDownstream(
+      '修改大纲或世界观会影响人物、目录和正文，请选择清理范围。',
+      'book',
+      () => setBookInfo({ ...bookInfo, [field]: value }),
+      '若只想重写正文，可选「仅正文」。'
+    );
   };
 
   // 生成书名选项（新增）
   const handleGenerateBookTitles = async () => {
+    if (!ensureSettingsReady()) return;
     if (!requireGate(!!bookInfo.themes?.length, '请先选择至少一个主题', 'book', '去选题材')) return;
     await runTask({
       kind: 'titles',
@@ -866,13 +703,20 @@ export default function App() {
 
   // 选择书名（新增）
   const handleSelectBookTitle = (title: string) => {
-    if (title !== bookInfo.title && !confirmAndClearNovelDownstream('切换书名会清空人物、目录和正文，避免新旧设定混用。是否继续？', 'book')) {
+    if (title === bookInfo.title) {
+      setBookInfo({ ...bookInfo, title, isTitleSelected: true, titleOptions: [] });
       return;
     }
-    setBookInfo({ ...bookInfo, title, isTitleSelected: true, titleOptions: [] }); // 选择后清空选项，让卡片消失
+    requestClearDownstream(
+      '切换书名会影响人物、目录和正文，请选择清理范围。',
+      'book',
+      () => setBookInfo({ ...bookInfo, title, isTitleSelected: true, titleOptions: [] }),
+      '避免新旧设定混用；若只重写正文可选「仅正文」。'
+    );
   };
 
   const handleGenerateBookInfo = async () => {
+    if (!ensureSettingsReady()) return;
     if (!requireGate(!!bookInfo.isTitleSelected && !!bookInfo.title, '请先生成并选择一个书名', 'book', '去选书名')) return;
     await runTask({
       kind: 'bookInfo',
@@ -888,6 +732,7 @@ export default function App() {
   };
 
   const handleGenerateCharacters = async () => {
+    if (!ensureSettingsReady()) return;
     if (!requireGate(!!bookInfo.title && !!bookInfo.outline, '请先生成或填写书籍信息（书名+大纲）', 'book', '去书籍信息')) return;
     await runTask({
       kind: 'characters',
@@ -904,6 +749,7 @@ export default function App() {
 
   // 生成境界体系
   const handleGenerateRealms = async () => {
+    if (!ensureSettingsReady()) return;
     if (!requireGate(!!bookInfo.title, '请先完成书籍信息', 'book', '去书籍信息')) return;
     if (!requireGate(characters.length > 0, '请先生成人物关系', 'characters', '去人物')) return;
     await runTask({
@@ -980,11 +826,36 @@ export default function App() {
     ));
   };
 
+
+  /** 按章号合并目录：永不因新批覆盖/丢掉已有合理章；同号以旧为准（可改为新） */
+  const mergeTocItems = (prev: TOCItem[], incoming: TOCItem[], preferIncoming = false): TOCItem[] => {
+    const map = new Map<number, TOCItem>();
+    prev.forEach(item => map.set(item.chapterNumber, item));
+    incoming.forEach(item => {
+      if (!map.has(item.chapterNumber) || preferIncoming) {
+        map.set(item.chapterNumber, item);
+      }
+    });
+    return Array.from(map.values()).sort((a, b) => a.chapterNumber - b.chapterNumber);
+  };
+
+  /** 下一个应生成的起点：优先补空洞，否则 max+1 */
+  const nextTocStartIndex = () => {
+    if (toc.length === 0) return 1;
+    const nums = new Set(toc.map(t => t.chapterNumber));
+    const max = Math.max(...nums);
+    for (let n = 1; n <= max; n++) {
+      if (!nums.has(n)) return n;
+    }
+    return max + 1;
+  };
+
   const handleGenerateTOC = async () => {
+    if (!ensureSettingsReady()) return;
     if (!requireGate(!!bookInfo.title, '请先完成书籍信息', 'book', '去书籍信息')) return;
     if (!requireGate(characters.length > 0, '请先生成人物关系', 'characters', '去人物')) return;
     
-    const startIndex = toc.length + 1;
+    const startIndex = nextTocStartIndex();
     if (startIndex > bookInfo.targetChapterCount) {
       pushToast('已生成全部目录！', 'success');
       return;
@@ -992,28 +863,59 @@ export default function App() {
 
     await runTask({
       kind: 'toc',
-      label: '生成大纲目录',
+      label: toc.some(t => t.chapterNumber >= startIndex) ? '补缺/续写大纲目录' : '生成大纲目录',
       run: async () => {
       const batchSize = 30;
-      const existingTitles = toc.map(item => item.title);
-      const existingSummaries = toc.map(item => item.summary);
-      const newChapters = await generateTOC(bookInfo, characters, settings, startIndex, batchSize, existingTitles, existingSummaries);
-      const similar = findSimilarSummaries(newChapters, toc);
-      if (similar.length > 0) {
-        pushToast(`本批目录已生成，但发现剧情摘要疑似重复：\n${similar.slice(0, 5).join('\n')}${similar.length > 5 ? '\n…共 ' + similar.length + ' 条' : ''}\n\n可在大纲目录中手动改写摘要后继续。`, 'success');
+      // 以「当前已有全部目录」为底座，失败也不会丢掉底座
+      const baseToc = [...toc];
+      const existingTitles = baseToc.map(item => item.title);
+      const existingSummaries = baseToc.map(item => item.summary);
+      let newChapters: TOCItem[] = [];
+      try {
+        newChapters = await generateTOC(bookInfo, characters, settings, startIndex, batchSize, existingTitles, existingSummaries);
+      } catch (e: any) {
+        // 彻底失败：底座仍在，只提示
+        pushToast(
+          `本批请求失败：${e?.message || e}。已有 ${baseToc.length} 章目录全部保留，可直接再点生成接着补。`,
+          'error'
+        );
+        setActiveTab('toc');
+        return;
       }
-      setToc([...toc, ...newChapters]);
+      const notes = ((newChapters as any).__sanitizedNotes || []) as string[];
+      const partial = ((newChapters as any).__partial || '') as string;
+      const similar = findSimilarSummaries(newChapters, baseToc);
+      // 合并入库：旧章优先保留，新章只补缺号
+      const merged = mergeTocItems(baseToc, newChapters, false);
+      setToc(merged);
       setActiveTab('toc');
+      if (notes.length > 0) {
+        pushToast(
+          `有 ${notes.length} 个过早「结局感」标题已自动改中性名，目录已保留。\n${notes.slice(0, 3).join('\n')}${notes.length > 3 ? '\n…' : ''}`,
+          'warn'
+        );
+      }
+      if (partial) {
+        pushToast(partial + '。不会清空已有目录，继续点生成即可补缺。', 'warn');
+      } else if (similar.length > 0) {
+        pushToast(
+          `本批目录已生成，但发现剧情摘要疑似重复：\n${similar.slice(0, 5).join('\n')}${similar.length > 5 ? '\n…共 ' + similar.length + ' 条' : ''}\n\n可在大纲目录中手动改写摘要后继续。`,
+          'success'
+        );
+      } else if (newChapters.length > 0) {
+        pushToast(`本批已加入 ${newChapters.length} 章目录`, 'success');
+      }
           },
     });
   };
 
   // 只生成单章目录（接在末尾）
   const handleGenerateSingleChapterOutline = async () => {
+    if (!ensureSettingsReady()) return;
     if (!requireGate(!!bookInfo.title, '请先完成书籍信息', 'book', '去书籍信息')) return;
     if (!requireGate(characters.length > 0, '请先生成人物关系', 'characters', '去人物')) return;
     
-    const nextChapterNum = toc.length + 1;
+    const nextChapterNum = nextTocStartIndex();
     if (nextChapterNum > bookInfo.targetChapterCount) {
       pushToast('已生成全部目录！', 'success');
       return;
@@ -1027,8 +929,16 @@ export default function App() {
       // 只生成1章
       const newChapters = await generateTOC(bookInfo, characters, settings, nextChapterNum, 1, existingTitles, toc.map(item => item.summary));
       if (newChapters.length > 0) {
-        setToc([...toc, ...newChapters]);
-        pushToast(`第${nextChapterNum}章目录生成成功！`, 'success');
+        setToc(mergeTocItems(toc, newChapters, true));
+        const notes = ((newChapters as any).__sanitizedNotes || []) as string[];
+        pushToast(
+          notes.length
+            ? `第${nextChapterNum}章目录已生成（标题已自动避开结局感）`
+            : `第${nextChapterNum}章目录生成成功！`,
+          notes.length ? 'warn' : 'success'
+        );
+      } else {
+        pushToast('本单章未通过校验（摘要撞车或空返回），请再试一次；已有目录不受影响。', 'warn');
       }
           },
     });
@@ -1067,8 +977,8 @@ export default function App() {
       // 生成新标题
       const newChapters = await generateTOC(bookInfo, characters, settings, chapterNum, 1, existingTitles, toc.map(item => item.summary));
       if (newChapters.length > 0) {
-        // 替换原目录项
-        const updatedTOC = toc.map(item => 
+        // 替换原目录项（仅替换该章，其它章原样保留）
+        const updatedTOC = toc.map(item =>
           item.chapterNumber === chapterNum ? newChapters[0] : item
         );
         setToc(updatedTOC);
@@ -1124,16 +1034,35 @@ export default function App() {
     return warnings;
   };
 
-  const generateChapterWithQualityGate = async (tocItem: TOCItem, currentChapters: Record<number, string>, memory: NovelMemory = novelMemory) => {
+  const generateChapterWithQualityGate = async (
+    tocItem: TOCItem,
+    currentChapters: Record<number, string>,
+    memory: NovelMemory = novelMemory,
+    genOpts?: ChapterGenOptions
+  ) => {
     const previousContents: string[] = [];
     for (let i = 1; i < tocItem.chapterNumber; i++) {
       if (currentChapters[i]) previousContents.push(currentChapters[i]);
     }
     const previousContent = previousContents[previousContents.length - 1];
     const activeRealmProgress = bookInfo.enableRealms !== false ? realmProgress : undefined;
-    const content = await generateChapterContent(bookInfo, characters, tocItem, previousContents, settings, toc, activeRealmProgress, memory);
+    const signal = genOpts?.signal || abortControllerRef.current?.signal;
+    const content = await generateChapterContent(
+      bookInfo,
+      characters,
+      tocItem,
+      previousContents,
+      settings,
+      toc,
+      activeRealmProgress,
+      memory,
+      { ...genOpts, signal }
+    );
     if (!content.trim()) {
       throw new Error('AI 返回的章节正文为空，请重试。');
+    }
+    if (signal?.aborted || cancelTaskRef.current) {
+      throw new Error('已取消');
     }
     const warnings = validateChapterContent(content, tocItem, previousContent);
     if (warnings.length > 0) {
@@ -1158,23 +1087,57 @@ export default function App() {
     return { content, nextMemory };
   };
 
-  const handleGenerateChapter = async (chapterNum: number) => {
+  const handleGenerateChapter = async (
+    chapterNum: number,
+    opts?: { mode?: ChapterGenOptions['mode']; directive?: string; stream?: boolean }
+  ) => {
+    if (!ensureSettingsReady()) return;
     const tocItem = toc.find(t => t.chapterNumber === chapterNum);
     if (!tocItem) return;
-
+    const mode = opts?.mode || 'write';
+    const existing = chapters[chapterNum] || '';
+    if (mode !== 'write' && !existing.trim()) {
+      pushToast('本章尚无正文，请先生成', 'warn');
+      return;
+    }
+    if (mode === 'rewrite' && !(opts?.directive || '').trim()) {
+      pushToast('请先填写「本章要改成…」', 'warn');
+      return;
+    }
+    const labelMap: Record<string, string> = {
+      write: `生成第 ${chapterNum} 章正文`,
+      continue: `续写第 ${chapterNum} 章`,
+      expand: `扩写第 ${chapterNum} 章`,
+      conclude: `收束第 ${chapterNum} 章`,
+      rewrite: `改写第 ${chapterNum} 章`,
+    };
     await runTask({
       kind: 'chapter',
-      label: `生成第 ${chapterNum} 章正文`,
+      label: labelMap[mode] || labelMap.write,
       cancellable: true,
       run: async () => {
         setGeneratingChapterNum(chapterNum);
         if (cancelTaskRef.current) throw new Error('已取消');
-        const { content } = await generateChapterWithQualityGate(tocItem, chapters);
+        const useStream = opts?.stream !== false && mode !== 'write' ? true : !!opts?.stream;
+        // 单章：有正文的改写类默认流式；首次 write 也可流式
+        const stream = opts?.stream !== false;
+        const { content } = await generateChapterWithQualityGate(tocItem, chapters, novelMemory, {
+          mode,
+          directive: opts?.directive,
+          existingContent: existing,
+          onChunk: stream
+            ? (full) => {
+                setChapters(prev => ({ ...prev, [chapterNum]: full }));
+                setChapterReadMode(false);
+              }
+            : undefined,
+        });
         if (cancelTaskRef.current) throw new Error('已取消');
         setChapters(prev => ({ ...prev, [chapterNum]: content }));
         setActiveChapterNum(chapterNum);
         setActiveTab('chapters');
         setGeneratingChapterNum(null);
+        pushToast(labelMap[mode] + '完成', 'success');
       },
     });
   };
@@ -1210,11 +1173,12 @@ export default function App() {
     setActiveChapterNum(1);
   };
 
-    const handleStopBatchGenerate = () => {
+  const handleStopBatchGenerate = () => {
     requestCancelTask();
   };
 
-const handleBatchGenerateChapters = async (opts?: { onlyFailed?: boolean; limit?: number }) => {
+  const handleBatchGenerateChapters = async (opts?: { onlyFailed?: boolean; onlyMissing?: boolean; limit?: number }) => {
+    if (!ensureSettingsReady()) return;
     const limit = opts?.limit ?? 20;
     let pool = toc.filter(t => !chapters[t.chapterNumber]);
     if (opts?.onlyFailed && batchFailedChapters.length > 0) {
@@ -1252,14 +1216,12 @@ const handleBatchGenerateChapters = async (opts?: { onlyFailed?: boolean; limit?
           const item = toGenerate[i];
           setGeneratingChapterNum(item.chapterNumber);
           setActiveChapterNum(item.chapterNumber);
-          setTaskState(prev => ({
-            ...prev,
+          patchTaskProgress({
+            kind: 'batch',
             label: `批量生成正文 ${i + 1}/${toGenerate.length} · 第${item.chapterNumber}章`,
             progress: { current: i + 1, total: toGenerate.length },
-            status: 'running',
-            kind: 'batch',
             cancellable: true,
-          }));
+          });
           try {
             const { content, nextMemory } = await generateChapterWithQualityGate(item, currentChapters, currentMemory);
             currentMemory = nextMemory;
@@ -1286,6 +1248,7 @@ const handleBatchGenerateChapters = async (opts?: { onlyFailed?: boolean; limit?
   };
 
   const handleGenerateShortStoryTitles = async () => {
+    if (!ensureSettingsReady()) return;
     if (!requireGate(!!shortStoryInfo.themes?.length, '请先选择至少一个主题', 'book', '去选题材')) return;
     await runTask({
       kind: 'shortTitles',
@@ -1298,6 +1261,7 @@ const handleBatchGenerateChapters = async (opts?: { onlyFailed?: boolean; limit?
   };
 
   const handleGenerateShortStoryOutline = async () => {
+    if (!ensureSettingsReady()) return;
     if (!requireGate(!!shortStoryInfo.title, '请先填写或选择一个故事标题', 'book', '去填标题')) return;
     await runTask({
       kind: 'shortOutline',
@@ -1408,6 +1372,7 @@ const handleBatchGenerateChapters = async (opts?: { onlyFailed?: boolean; limit?
 
   // 生成/续写短篇：按分段规划逐段推进
   const handleGenerateShortStoryContent = async (options?: { segmentIndex?: number; rewrite?: boolean; forceFinal?: boolean }) => {
+    if (!ensureSettingsReady()) return;
     if (!shortStoryInfo.outline && (!shortStoryInfo.segments || shortStoryInfo.segments.length === 0)) {
       requireGate(false, '请先填写脑洞大纲，或生成分段规划', 'book', '去短篇设定');
       return;
@@ -1496,24 +1461,124 @@ const handleBatchGenerateChapters = async (opts?: { onlyFailed?: boolean; limit?
     });
   };
 
-  const handleDownload = async (format: 'txt' | 'docx' = 'txt') => {
+
+  const handleRewriteChapterByQuality = async (chapterNum: number) => {
+    if (!ensureSettingsReady()) return;
+    const tocItem = toc.find(t => t.chapterNumber === chapterNum);
+    if (!tocItem) return;
+    const notes = chapterQualityNotes[chapterNum] || [];
+    await runTask({
+      kind: 'chapter',
+      label: `按质检重写第 ${chapterNum} 章`,
+      cancellable: true,
+      run: async () => {
+        setGeneratingChapterNum(chapterNum);
+        if (cancelTaskRef.current) throw new Error('已取消');
+        const noteText = notes.length
+          ? notes.join('\n- ')
+          : '在保持剧情的前提下提升文笔、衔接与字数达标。';
+        const patched: TOCItem = {
+          ...tocItem,
+          summary:
+            (tocItem.summary || '') +
+            `\n\n【质检重写要求】\n- ${noteText}\n请针对以上问题改写本章，保留主线与人物一致。`,
+        };
+        const existing = chapters[chapterNum] || '';
+        const { content } = await generateChapterWithQualityGate(patched, chapters, novelMemory, {
+          mode: 'rewrite',
+          directive: noteText,
+          existingContent: existing,
+          onChunk: (full) => setChapters(prev => ({ ...prev, [chapterNum]: full })),
+        });
+        if (cancelTaskRef.current) throw new Error('已取消');
+        setChapters(prev => ({ ...prev, [chapterNum]: content }));
+        setActiveChapterNum(chapterNum);
+        setActiveTab('chapters');
+        setGeneratingChapterNum(null);
+        pushToast(`第 ${chapterNum} 章已按质检意见重写`, 'success');
+      },
+    });
+  };
+
+  const handlePipelineToToc = async () => {
+    if (!ensureSettingsReady()) return;
+    if (!bookInfo.themes?.length) {
+      requireGate(false, '请先选择主题', 'book', '去选题材');
+      return;
+    }
+    if (!bookInfo.isTitleSelected || !bookInfo.title) {
+      pushToast('请先生成并点选书名，再运行流水线', 'warn', { label: '去书籍信息', tab: 'book' });
+      setActiveTab('book');
+      return;
+    }
+    if (!bookInfo.outline) {
+      await handleGenerateBookInfo();
+    }
+    if (cancelTaskRef.current) return;
+    if (!characters.length) {
+      await handleGenerateCharacters();
+    }
+    if (cancelTaskRef.current) return;
+    if (!toc.length) {
+      await handleGenerateTOC();
+    }
+    pushToast('流水线已尽量推进到目录（可随时停止任务）', 'success', { label: '去目录', tab: 'toc' });
+  };
+
+  const handleDownload = async (
+    format: 'txt' | 'docx' = 'txt',
+    opts?: { onlyWritten?: boolean; volumeSize?: number; withCover?: boolean }
+  ) => {
+    const onlyWritten = opts?.onlyWritten !== false; // 默认只导出已写章
+    const withCover = opts?.withCover !== false;
+    const volumeSize = opts?.volumeSize || 0;
+
+    const buildCoverTxt = () => {
+      const written = Object.keys(chapters).length;
+      const words = Object.values(chapters).join('').replace(/\s/g, '').length;
+      return (
+        `《${bookInfo.title || '未命名小说'}》\n` +
+        `题材：${(bookInfo.themes || []).join('、') || '未填'}\n` +
+        `大纲：${(bookInfo.outline || '').slice(0, 200)}${(bookInfo.outline || '').length > 200 ? '…' : ''}\n` +
+        `已写 ${written} 章 · 约 ${words} 字\n` +
+        `导出时间：${new Date().toLocaleString()}\n\n————————\n\n`
+      );
+    };
+
     if (mode === 'novel') {
-      if (Object.keys(chapters).length === 0) return;
-      
+      if (Object.keys(chapters).length === 0) {
+        pushToast('还没有已写章节可导出', 'warn');
+        return;
+      }
       if (format === 'docx') {
-        await downloadNovelAsWord();
-      } else {
-        let fullText = `《${bookInfo.title || '未命名小说'}》\n\n`;
-        toc.forEach(item => {
-          if (chapters[item.chapterNumber]) {
+        await downloadNovelAsWord({ onlyWritten, volumeSize, withCover });
+      } else if (volumeSize > 0) {
+        // 分卷 txt
+        const items = toc.filter(t => chapters[t.chapterNumber]);
+        let vol = 1;
+        for (let i = 0; i < items.length; i += volumeSize) {
+          const slice = items.slice(i, i + volumeSize);
+          let fullText = withCover ? buildCoverTxt() + `第 ${vol} 卷\n\n` : `《${bookInfo.title || '小说'}》第 ${vol} 卷\n\n`;
+          slice.forEach(item => {
             fullText += `第${item.chapterNumber}章 ${item.title}\n\n${chapters[item.chapterNumber]}\n\n`;
+          });
+          downloadText(fullText, `${bookInfo.title || '小说'}_卷${vol}.txt`);
+          vol += 1;
+        }
+        pushToast(`已导出 ${vol - 1} 个分卷 TXT`, 'success');
+      } else {
+        let fullText = withCover ? buildCoverTxt() : `《${bookInfo.title || '未命名小说'}》\n\n`;
+        toc.forEach(item => {
+          if (!onlyWritten || chapters[item.chapterNumber]) {
+            if (chapters[item.chapterNumber]) {
+              fullText += `第${item.chapterNumber}章 ${item.title}\n\n${chapters[item.chapterNumber]}\n\n`;
+            }
           }
         });
         downloadText(fullText, `${bookInfo.title || '小说'}.txt`);
       }
     } else {
       if (!shortStoryInfo.content) return;
-      
       if (format === 'docx') {
         await downloadShortStoryAsWord();
       } else {
@@ -1523,62 +1588,58 @@ const handleBatchGenerateChapters = async (opts?: { onlyFailed?: boolean; limit?
     }
   };
 
-  const downloadNovelAsWord = async () => {
-    const paragraphs: Paragraph[] = [];
-    
-    // 添加标题
-    paragraphs.push(
-      new Paragraph({
-        text: bookInfo.title || '未命名小说',
-        heading: HeadingLevel.TITLE,
-        alignment: AlignmentType.CENTER,
-        spacing: { after: 400 }
-      })
-    );
-    
-    // 添加每一章
-    toc.forEach(item => {
-      if (chapters[item.chapterNumber]) {
-        // 章节标题
-        paragraphs.push(
-          new Paragraph({
-            text: `第${item.chapterNumber}章 ${item.title}`,
-            heading: HeadingLevel.HEADING_1,
-            spacing: { before: 300, after: 200 }
-          })
-        );
-        
-        // 章节内容 - 按段落分割
-        const content = chapters[item.chapterNumber];
-        const contentParagraphs = content.split(/\n+/).filter(p => p.trim());
-        
-        contentParagraphs.forEach(para => {
-          paragraphs.push(
-            new Paragraph({
-              text: para.trim(),
-              spacing: { after: 200 },
-              indent: { firstLine: 480 } // 首行缩进2字符
-            })
-          );
-        });
-        
-        // 章节之间添加空行
-        paragraphs.push(new Paragraph({ text: '' }));
+  const downloadNovelAsWord = async (opts?: { onlyWritten?: boolean; volumeSize?: number; withCover?: boolean }) => {
+    const { Document, Paragraph, TextRun, HeadingLevel, AlignmentType, Packer } = await import('docx');
+    const onlyWritten = opts?.onlyWritten !== false;
+    const withCover = opts?.withCover !== false;
+    const volumeSize = opts?.volumeSize || 0;
+    const items = toc.filter(t => !onlyWritten || chapters[t.chapterNumber]).filter(t => chapters[t.chapterNumber]);
+
+    const buildParas = (slice: typeof items, volLabel?: string) => {
+      const paragraphs: any[] = [];
+      if (withCover) {
+        const written = Object.keys(chapters).length;
+        const words = Object.values(chapters).join('').replace(/\s/g, '').length;
+        paragraphs.push(new Paragraph({ text: bookInfo.title || '未命名小说', heading: HeadingLevel.TITLE, alignment: AlignmentType.CENTER, spacing: { after: 200 } }));
+        if (volLabel) paragraphs.push(new Paragraph({ text: volLabel, alignment: AlignmentType.CENTER, spacing: { after: 200 } }));
+        paragraphs.push(new Paragraph({ text: `题材：${(bookInfo.themes || []).join('、') || '未填'}`, spacing: { after: 120 } }));
+        paragraphs.push(new Paragraph({ text: `已写 ${written} 章 · 约 ${words} 字`, spacing: { after: 120 } }));
+        paragraphs.push(new Paragraph({ text: `导出：${new Date().toLocaleString()}`, spacing: { after: 300 } }));
+        paragraphs.push(new Paragraph({ text: '————————', spacing: { after: 300 } }));
+      } else {
+        paragraphs.push(new Paragraph({ text: bookInfo.title || '未命名小说', heading: HeadingLevel.TITLE, alignment: AlignmentType.CENTER, spacing: { after: 400 } }));
       }
-    });
-    
-    const doc = new Document({
-      sections: [{
-        properties: {},
-        children: paragraphs
-      }]
-    });
-    
+      slice.forEach(item => {
+        paragraphs.push(new Paragraph({ text: `第${item.chapterNumber}章 ${item.title}`, heading: HeadingLevel.HEADING_1, spacing: { before: 300, after: 200 } }));
+        const content = chapters[item.chapterNumber];
+        content.split(/\n+/).filter(p => p.trim()).forEach(para => {
+          paragraphs.push(new Paragraph({ text: para.trim(), spacing: { after: 200 }, indent: { firstLine: 480 } }));
+        });
+        paragraphs.push(new Paragraph({ text: '' }));
+      });
+      return paragraphs;
+    };
+
+    if (volumeSize > 0) {
+      let vol = 1;
+      for (let i = 0; i < items.length; i += volumeSize) {
+        const slice = items.slice(i, i + volumeSize);
+        const doc = new Document({ sections: [{ properties: {}, children: buildParas(slice, `第 ${vol} 卷`) }] });
+        const blob = await Packer.toBlob(doc);
+        saveAs(blob, `${bookInfo.title || '小说'}_卷${vol}.docx`);
+        vol += 1;
+      }
+      pushToast(`已导出 ${vol - 1} 个分卷 Word`, 'success');
+      return;
+    }
+
+    const doc = new Document({ sections: [{ properties: {}, children: buildParas(items) }] });
     const blob = await Packer.toBlob(doc);
     saveAs(blob, `${bookInfo.title || '小说'}.docx`);
   };
 
   const downloadShortStoryAsWord = async () => {
+    const { Document, Paragraph, TextRun, HeadingLevel, AlignmentType, Packer } = await import('docx');
     const paragraphs: Paragraph[] = [];
     
     // 添加标题
@@ -1627,1397 +1688,327 @@ const handleBatchGenerateChapters = async (opts?: { onlyFailed?: boolean; limit?
 
   // Renderers
   const renderSettings = () => (
-    <div className="max-w-2xl mx-auto space-y-6">
-      <div className="ui-card p-6">
-        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-6">
-          <div>
-            <p className="text-xs font-semibold tracking-[.16em] uppercase text-[var(--ui-accent-text)]">写作引擎</p>
-            <h2 className="text-xl font-semibold text-[var(--ui-ink)] mt-1">API & 模型设置</h2>
-            <p className="text-sm text-[var(--ui-muted)] mt-1">配置会自动保存到本机，开始写作前可先检测可用模型。</p>
-          </div>
-          <span className="ui-status-pill self-start">
-            <span className="w-1.5 h-1.5 rounded-full bg-[var(--ui-success)]" />
-            已自动保存
-          </span>
-        </div>
-        <div className="space-y-4">
-          {/* 已保存供应商卡片：一键切换 */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <label className="block text-sm font-medium text-stone-700">供应商卡片</label>
-              <span className="text-[11px] text-[var(--ui-muted)]">保存后可随时切换配置与模型</span>
-            </div>
-            {providerProfiles.length === 0 ? (
-              <p className="text-xs text-[var(--ui-muted)] mb-2 ui-seed-tip">
-                还没有卡片。点「＋ 添加新供应商」填配置，再「保存为新卡片」；可保存多套随时切换。
-              </p>
-            ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-                {providerProfiles.map(p => (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => activateProviderProfile(p)}
-                    className={`ui-provider-card text-left ${
-                      activeProfileId === p.id ? 'ui-provider-card-active' : ''
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="text-sm font-semibold text-[var(--ui-ink)] truncate">{p.name}</div>
-                        <div className="text-[11px] text-[var(--ui-muted)] mt-0.5 truncate">
-                          {PROVIDERS[p.provider]?.label || p.provider} · {p.model || '未选模型'}
-                        </div>
-                      </div>
-                      {activeProfileId === p.id && (
-                        <span className="text-[10px] font-semibold text-[var(--ui-accent-text)] shrink-0">使用中</span>
-                      )}
-                    </div>
-                    <div className="flex gap-2 mt-2" onClick={e => e.stopPropagation()}>
-                      <button
-                        type="button"
-                        className="text-[11px] text-red-600 hover:underline"
-                        onClick={() => {
-                          if (confirm(`删除卡片「${p.name}」？`)) deleteProviderProfile(p.id);
-                        }}
-                      >
-                        删除
-                      </button>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-            <div className="flex flex-wrap gap-2 mb-2">
-              <button
-                type="button"
-                onClick={beginNewProviderProfile}
-                className="ui-btn-secondary text-sm whitespace-nowrap"
-              >
-                ＋ 添加新供应商
-              </button>
-              {!activeProfileId && (
-                <span className="text-[11px] text-[var(--ui-muted)] self-center">
-                  当前为新建草稿，不会改动已有卡片
-                </span>
-              )}
-            </div>
-            <div className="flex flex-col sm:flex-row gap-2 mb-1">
-              <input
-                type="text"
-                value={profileNameDraft}
-                onChange={e => setProfileNameDraft(e.target.value)}
-                placeholder="卡片名称，如：日日新 / 商汤 DeepSeek"
-                className="flex-1 ui-input"
-              />
-              <button
-                type="button"
-                onClick={() => saveProviderProfile(false)}
-                disabled={!activeProfileId}
-                className="ui-btn-primary text-sm whitespace-nowrap disabled:opacity-45 disabled:cursor-not-allowed"
-                title={!activeProfileId ? '新建时请用「保存为新卡片」' : '把下方表单写回当前使用中的卡片'}
-              >
-                更新当前卡片
-              </button>
-              <button
-                type="button"
-                onClick={() => saveProviderProfile(true)}
-                className="ui-btn-secondary text-sm whitespace-nowrap"
-              >
-                保存为新卡片
-              </button>
-            </div>
-            <p className="text-[11px] text-[var(--ui-muted)] mb-1">
-              {activeProfileId
-                ? '编辑下方配置后可「更新当前卡片」；或「保存为新卡片」再加一套，已有卡片不会被清掉。'
-                : '新建模式：改 Base URL / Key / 模型后点「保存为新卡片」。点左侧旧卡片可随时切回。'}
-            </p>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-stone-700 mb-1">AI 供应商</label>
-            <select 
-              value={settings.provider}
-              onChange={(e) => handleProviderChange(e.target.value as Provider)}
-              className="w-full ui-input"
-            >
-              {Object.entries(PROVIDERS).map(([key, { label }]) => (
-                <option key={key} value={key}>{label}</option>
-              ))}
-            </select>
-          </div>
-
-          {settings.provider !== 'gemini' && (
-            <div>
-              <label className="block text-sm font-medium text-stone-700 mb-1">Base URL</label>
-              <input 
-                type="text" 
-                value={settings.baseUrl || ''}
-                onChange={(e) => setSettings({...settings, baseUrl: e.target.value})}
-                className="w-full ui-input"
-              />
-            </div>
-          )}
-
-          <div>
-            <div className="flex justify-between items-center mb-1">
-              <label className="block text-sm font-medium text-stone-700">
-                {settings.provider === 'free' ? 'API Keys (轮询)' : 'API Key'}
-              </label>
-              <a 
-                href="https://pan.quark.cn/s/12ccdf62ccd8" 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="text-xs text-[var(--ui-accent-text)] hover:text-[var(--ui-accent-text)] font-medium"
-              >
-                获取免费 Token
-              </a>
-            </div>
-            
-            {settings.provider === 'free' ? (
-              // 免费提供商：多密钥输入
-              <div className="space-y-2">
-                {(!settings.apiKeys || settings.apiKeys.length === 0) ? (
-                  <div className="text-sm text-[var(--ui-muted)] italic">点击下方按钮添加密钥，支持添加多个密钥自动轮询</div>
-                ) : (
-                  settings.apiKeys.map((key, index) => (
-                    <div key={index} className="flex gap-2">
-                      <input 
-                        type="password" 
-                        value={key}
-                        onChange={(e) => {
-                          const newKeys = [...(settings.apiKeys || [])];
-                          newKeys[index] = e.target.value;
-                          setSettings({...settings, apiKeys: newKeys});
-                        }}
-                        placeholder={`密钥 ${index + 1}`}
-                        className="flex-1 ui-input"
-                      />
-                      <button
-                        onClick={() => {
-                          const newKeys = (settings.apiKeys || []).filter((_, i) => i !== index);
-                          setSettings({...settings, apiKeys: newKeys});
-                        }}
-                        className="px-2 py-1 text-xs text-red-600 hover:bg-red-50 rounded"
-                      >
-                        删除
-                      </button>
-                    </div>
-                  ))
-                )}
-                <button
-                  onClick={() => setSettings({...settings, apiKeys: [...(settings.apiKeys || []), '']})}
-                  className="ui-btn-secondary w-full"
-                >
-                  + 添加密钥
-                </button>
-                <p className="text-xs text-[var(--ui-muted)]">
-                  已添加 {settings.apiKeys?.length || 0} 个密钥，系统会自动轮询使用。当某个密钥过期时会自动切换到下一个。
-                </p>
-              </div>
-            ) : (
-              // 其他提供商：单密钥输入
-              <>
-                <input 
-                  type="password" 
-                  value={settings.apiKey}
-                  onChange={(e) => setSettings({...settings, apiKey: e.target.value})}
-                  placeholder={settings.provider === 'gemini' ? "留空则使用系统默认 Key" : "sk-..."}
-                  className="w-full ui-input"
-                />
-                {settings.provider === 'gemini' && !settings.apiKey && (
-                  <p className="text-xs text-[var(--ui-muted)] mt-1">当前正在使用 AI Studio 平台自动注入的安全密钥。</p>
-                )}
-              </>
-            )}
-          </div>
-
-          <div>
-            <div className="flex justify-between items-center mb-1">
-              <label className="block text-sm font-medium text-stone-700">模型名称</label>
-              {settings.provider !== 'gemini' && (
-                <button
-                  onClick={handleDetectModels}
-                  disabled={isTaskBusy}
-                  className="ui-btn-ghost text-xs disabled:opacity-50"
-                >
-                  {isGenerating ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-                  检测可用模型
-                </button>
-              )}
-            </div>
-            {settings.availableModels && settings.availableModels.length > 0 ? (
-              <select
-                value={settings.model}
-                onChange={(e) => setSettings({...settings, model: e.target.value})}
-                className="w-full ui-input"
-              >
-                {settings.availableModels.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.name}
-                    {model.contextLength && ` (${model.contextLength})`}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <input
-                type="text"
-                value={settings.model || ''}
-                onChange={(e) => setSettings({...settings, model: e.target.value})}
-                className="w-full ui-input"
-              />
-            )}
-            {settings.availableModels && settings.availableModels.length > 0 && (
-              <p className="text-xs text-[var(--ui-muted)] mt-1">检测到 {settings.availableModels.length} 个可用模型</p>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {mode === 'novel' && (
-        <div className="ui-card p-6">
-          <h2 className="text-xl font-semibold text-[var(--ui-ink)] mb-6">生成偏好 (长篇小说)</h2>
-          <div className="space-y-6">
-            <div>
-              <label className="block text-sm font-medium text-stone-700 mb-1">每章最低字数</label>
-              <input 
-                type="number" 
-                value={settings.minWordCount || 2000}
-                onChange={(e) => setSettings({...settings, minWordCount: parseInt(e.target.value) || 2000})}
-                min={500}
-                step={500}
-                className="w-full ui-input"
-              />
-              <p className="text-xs text-[var(--ui-muted)] mt-1">AI 会尽量满足此字数要求，建议设置在 1000 - 3000 之间。</p>
-            </div>
-            
-            <div>
-              <div className="flex justify-between items-center mb-2">
-                <label className="block text-sm font-medium text-stone-700">创作自由度 (Temperature)</label>
-                <span className="text-sm font-semibold text-[var(--ui-accent-text)]">{(settings.temperature ?? 0.9).toFixed(1)}</span>
-              </div>
-              <input 
-                type="range" 
-                value={settings.temperature ?? 0.9}
-                onChange={(e) => setSettings({...settings, temperature: parseFloat(e.target.value)})}
-                min={0}
-                max={2}
-                step={0.1}
-                className="w-full h-2 bg-stone-200 rounded-lg appearance-none cursor-pointer accent-[var(--ui-accent)]"
-              />
-              <div className="flex justify-between text-xs text-[var(--ui-muted)] mt-1">
-                <span>0.0 (保守)</span>
-                <span>1.0 (平衡)</span>
-                <span>2.0 (激进)</span>
-              </div>
-              <p className="text-xs text-[var(--ui-muted)] mt-2">
-                <span className="font-medium">说明：</span>
-                {(settings.temperature ?? 0.9) < 0.5 && '保守模式，内容更规范但可能缺乏创意'}
-                {(settings.temperature ?? 0.9) >= 0.5 && (settings.temperature ?? 0.9) < 1.2 && '平衡模式，适合大多数创作场景'}
-                {(settings.temperature ?? 0.9) >= 1.2 && '激进模式，内容更自由大胆，可能包含成人内容'}
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <div className="ui-card p-5">
-        <div className="text-center">
-          <h2 className="text-sm font-semibold text-[var(--ui-ink)]">赞助支持</h2>
-          <p className="text-xs text-[var(--ui-muted)] mt-1">你的支持是小羊老师继续维护的动力</p>
-        </div>
-        <div className="flex gap-4 justify-center mt-4">
-          <div className="flex flex-col items-center gap-2 p-2.5 rounded-xl border border-white/70 bg-white/45">
-            <img src="/微信.png" alt="微信支付" className="w-28 h-28 rounded-lg" />
-            <span className="text-[11px] font-medium text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">微信</span>
-          </div>
-          <div className="flex flex-col items-center gap-2 p-2.5 rounded-xl border border-white/70 bg-white/45">
-            <img src="/支付宝.png" alt="支付宝支付" className="w-28 h-28 rounded-lg" />
-            <span className="text-[11px] font-medium text-sky-700 bg-sky-50 px-2 py-0.5 rounded-full">支付宝</span>
-          </div>
-        </div>
-      </div>
-    </div>
+    <SettingsPanel
+      mode={mode}
+      settings={settings}
+      setSettings={setSettings}
+      isTaskBusy={isTaskBusy}
+      isGenerating={isGenerating}
+      providerProfiles={providerProfiles}
+      activeProfileId={activeProfileId}
+      profileNameDraft={profileNameDraft}
+      setProfileNameDraft={setProfileNameDraft}
+      onActivateProfile={activateProviderProfile}
+      onDeleteProfile={deleteProviderProfile}
+      onBeginNewProfile={beginNewProviderProfile}
+      onSaveProfile={saveProviderProfile}
+      onProviderChange={handleProviderChange}
+      onDetectModels={handleDetectModels}
+    />
   );
 
-  const renderBookInfo = () => {
-    if (mode === 'shortStory') {
-      return (
-        <div className="max-w-3xl mx-auto space-y-6">
-          <div className="flex justify-between items-center mb-6">
-            <h2 className="text-2xl font-semibold text-[var(--ui-ink)]">短篇故事设定</h2>
-          </div>
 
-          <div className="ui-card p-6 md:p-8 space-y-6">
-            <ThemeSelector 
-              type="shortStory"
-              selectedThemes={shortStoryInfo.themes} 
-              onChange={(themes) => setShortStoryInfo({...shortStoryInfo, themes})} 
-            />
-            
-            <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1.4fr)_minmax(0,0.8fr)] gap-5 items-start">
-              <div className="space-y-2 min-w-0">
-                <label className="block text-sm font-medium text-stone-700 leading-5 h-5">故事标题</label>
-                <div className="flex gap-2 items-center min-h-11">
-                  <input 
-                    type="text" 
-                    value={shortStoryInfo.title}
-                    onChange={(e) => setShortStoryInfo({...shortStoryInfo, title: e.target.value})}
-                    placeholder="请输入标题，或点右侧 AI 构思"
-                    className="flex-1 min-w-0 ui-input h-11"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleGenerateShortStoryTitles}
-                    disabled={isGenerating || !shortStoryInfo.themes || shortStoryInfo.themes.length === 0}
-                    className="ui-btn-ghost text-xs shrink-0 h-11 px-3 disabled:opacity-50 whitespace-nowrap"
-                  >
-                    {isGenerating && (!shortStoryTitleOptions || shortStoryTitleOptions.length === 0) ? <Loader2 className="w-3 h-3 animate-spin" /> : <Wand2 className="w-3 h-3" />}
-                    AI 构思标题
-                  </button>
-                </div>
-                {shortStoryTitleOptions && shortStoryTitleOptions.length > 0 && (
-                  <div className="mt-1 flex flex-wrap gap-2">
-                    {shortStoryTitleOptions.map((t, idx) => (
-                      <button
-                        key={idx}
-                        type="button"
-                        onClick={() => setShortStoryInfo({...shortStoryInfo, title: t})}
-                        className="px-2.5 py-1.5 text-xs bg-[var(--ui-accent-soft)] text-[var(--ui-accent-text)] rounded-lg border border-[var(--ui-line)] hover:brightness-95 transition-colors"
-                      >
-                        {t}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <div className="space-y-2 min-w-0">
-                <label className="block text-sm font-medium text-stone-700 leading-5 h-5">目标总字数</label>
-                <div className="flex gap-2 items-center min-h-11">
-                  <input 
-                    type="number" 
-                    value={shortStoryInfo.targetWordCount}
-                    onChange={(e) => {
-                      const n = parseInt(e.target.value, 10);
-                      setShortStoryInfo({
-                        ...shortStoryInfo,
-                        targetWordCount: Number.isFinite(n) ? Math.min(30000, Math.max(1000, n)) : 10000
-                      });
-                    }}
-                    min={1000}
-                    max={30000}
-                    step={500}
-                    className="w-full ui-input h-11"
-                  />
-                </div>
-                <p className="text-xs text-[var(--ui-muted)]">建议 7000–12000 字（约中篇短故事）；当前 {shortStoryInfo.targetWordCount || 0} 字</p>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <div className="flex flex-wrap justify-between items-center gap-2">
-                <label className="block text-sm font-medium text-stone-700">核心脑洞 / 故事大纲</label>
-                <button
-                  type="button"
-                  onClick={handleGenerateShortStoryOutline}
-                  disabled={isGenerating || !shortStoryInfo.title}
-                  className="ui-btn-ghost text-xs disabled:opacity-50 h-9 px-3"
-                >
-                  {isGenerating && shortStoryInfo.title && !shortStoryInfo.outline ? <Loader2 className="w-3 h-3 animate-spin" /> : <Wand2 className="w-3 h-3" />}
-                  AI 生成大纲
-                </button>
-              </div>
-              <textarea 
-                value={shortStoryInfo.outline}
-                onChange={(e) => setShortStoryInfo({...shortStoryInfo, outline: e.target.value})}
-                placeholder="描述这个短篇故事的核心创意、主要情节和结局。也可以先点右上角「AI 生成大纲」。"
-                rows={8}
-                className="w-full ui-input ui-textarea min-h-[11rem] resize-y"
-              />
-            </div>
-            <div className="ui-seed-tip text-sm text-[var(--ui-muted)]">
-              先选主题 → 定标题与目标字数 → 写清大纲 → 再到「故事正文」按段生成。
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    return (
-      <div className="max-w-5xl mx-auto space-y-6">
-        <div className="flex justify-between items-center mb-6">
-          <div>
-            <p className="text-xs font-semibold tracking-[.16em] uppercase text-[var(--ui-accent-text)]">第一步 · 故事种子</p>
-            <h2 className="text-2xl font-semibold text-[var(--ui-ink)] mt-1">书籍设定</h2>
-            <p className="text-sm text-[var(--ui-muted)] mt-1">从题材、篇幅与书名开始，为故事建立第一块骨架。</p>
-          </div>
-          <button
-            onClick={handleGenerateBookInfo}
-            disabled={isGenerating || !bookInfo.isTitleSelected}
-            className="ui-btn-primary disabled:opacity-70"
-          >
-            {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
-            AI 生成大纲设定
-          </button>
-        </div>
-
-        <div className="ui-card p-6 md:p-8 space-y-6">
-          <ThemeSelector 
-            selectedThemes={bookInfo.themes} 
-            onChange={handleBookThemesChange}
-          />
-          
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
-            <div className="space-y-2 min-w-0">
-              <label className="block text-sm font-medium text-stone-700 leading-5 h-5">小说篇幅</label>
-              <div className="flex gap-2 items-center min-h-11">
-                <select 
-                  value={bookInfo.lengthType}
-                  onChange={(e) => handleLengthChange(e.target.value)}
-                  className="flex-1 min-w-0 ui-input h-11"
-                >
-                  {LENGTHS.map(l => (
-                    <option key={l.value} value={l.value}>{l.label}</option>
-                  ))}
-                </select>
-                {bookInfo.lengthType === 'custom' && (
-                  <div className="flex items-center gap-2 w-32 shrink-0">
-                    <input
-                      type="number"
-                      min="1"
-                      max="10000"
-                      value={bookInfo.targetChapterCount}
-                      onChange={(e) => setBookInfo({ ...bookInfo, targetChapterCount: parseInt(e.target.value) || 1 })}
-                      className="w-full ui-input h-11"
-                      placeholder="章数"
-                    />
-                    <span className="text-sm text-[var(--ui-muted)] shrink-0">章</span>
-                  </div>
-                )}
-              </div>
-            </div>
-            <div className="space-y-2 min-w-0">
-              <label className="block text-sm font-medium text-stone-700 leading-5 h-5">书名</label>
-              <div className="flex gap-2 items-center min-h-11">
-                <input 
-                  type="text" 
-                  value={bookInfo.title}
-                  onChange={(e) => handleBookTitleInput(e.target.value)}
-                  placeholder="请先生成书名或手动输入"
-                  className="flex-1 min-w-0 ui-input h-11"
-                />
-                <button
-                  type="button"
-                  onClick={handleGenerateBookTitles}
-                  disabled={isGenerating || !bookInfo.themes || bookInfo.themes.length === 0}
-                  className="ui-btn-ghost text-xs shrink-0 h-11 px-3 disabled:opacity-50 whitespace-nowrap"
-                >
-                  {isGenerating && (!bookInfo.titleOptions || bookInfo.titleOptions.length === 0) ? <Loader2 className="w-3 h-3 animate-spin" /> : <Wand2 className="w-3 h-3" />}
-                  AI 构思书名
-                </button>
-              </div>
-            </div>
-          </div>
-          
-          {/* 书名卡片选择区域 - 选择后自动消失 */}
-          {bookInfo.titleOptions && bookInfo.titleOptions.length > 0 && (
-            <div className="border-t border-[var(--ui-line)] pt-6 -mx-8 px-8">
-              <p className="text-sm text-[var(--ui-muted)] mb-4 font-medium">从这些名字里，选择最像你故事的那一个：</p>
-              <div className="grid grid-cols-1 gap-3">
-                {bookInfo.titleOptions.map((option, idx) => (
-                  <button
-                    key={idx}
-                    onClick={() => handleSelectBookTitle(option.title)}
-                    className="ui-title-choice text-left p-5 group"
-                  >
-                    <div className="flex items-start gap-4">
-                      <div className="flex-shrink-0 w-10 h-10 bg-[var(--ui-accent)] text-white rounded-lg flex items-center justify-center font-bold text-base group-hover:scale-110 transition-transform">
-                        {idx + 1}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <h3 className="font-semibold text-[var(--ui-ink)] text-base mb-1.5 group-hover:text-[var(--ui-accent-text)] transition-colors">
-                          《{option.title}》
-                        </h3>
-                        <p className="text-sm text-stone-600 leading-relaxed">
-                          {option.intro}
-                        </p>
-                      </div>
-                      <div className="flex-shrink-0 text-[var(--ui-accent)] group-hover:text-[var(--ui-accent-text)] transition-colors">
-                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                        </svg>
-                      </div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-          
-          {/* 已选择书名提示 */}
-          {bookInfo.isTitleSelected && bookInfo.title && (
-            <div className="border-t border-stone-100 pt-6">
-              <p className="text-sm text-[var(--ui-success)] flex items-center gap-2 mb-4">
-                <span className="w-2 h-2 bg-[var(--ui-success)] rounded-full"></span>
-                已选择书名：《{bookInfo.title}》
-              </p>
-              
-              {/* 境界 / 世界规则开关 */}
-              <div className="ui-realm-note flex items-center justify-between p-4">
-                <div className="flex-1">
-                  <label className="text-sm font-medium text-[var(--ui-ink)] flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={bookInfo.enableRealms ?? (themesRecommendRealms(bookInfo.themes) === 'recommend')}
-                      onChange={(e) => {
-                        const enableRealms = e.target.checked;
-                        setBookInfo({...bookInfo, enableRealms});
-                        if (!enableRealms) {
-                          setRealmProgress({ realms: [], protagonistCurrentRealmIndex: 0, protagonistCurrentSubRealmIndex: 0, chapterRealmMap: {} });
-                        }
-                      }}
-                      className="w-4 h-4 text-[var(--ui-accent-text)] border-amber-300 rounded focus:ring-[rgba(196,92,38,0.15)]"
-                    />
-                    启用{getRealmSystemLabel(bookInfo.themes).title}
-                  </label>
-                  <p className="text-xs text-[var(--ui-muted)] mt-1 ml-6">
-                    {getRealmSystemLabel(bookInfo.themes).hint}
-                    {themesRecommendRealms(bookInfo.themes) === 'recommend' && '（当前题材：建议开启）'}
-                    {themesRecommendRealms(bookInfo.themes) === 'hide' && '（当前题材：默认不推荐，可选）'}
-                    {themesRecommendRealms(bookInfo.themes) === 'optional' && '（当前题材：按需开启）'}
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-          
-          {/* 大纲和世界观 - 始终显示 */}
-          <div className="space-y-6">
-            <div>
-              <label className="block text-sm font-medium text-stone-700 mb-2">故事大纲</label>
-              <textarea 
-                value={bookInfo.outline}
-                onChange={(e) => handleBookPlanningFieldChange('outline', e.target.value)}
-                placeholder={bookInfo.isTitleSelected ? "点击右上角按钮生成，或手动填写..." : "请先选择书名后再填写大纲"}
-                disabled={!bookInfo.isTitleSelected}
-                className="w-full ui-input"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-stone-700 mb-2">世界观设定</label>
-              <textarea 
-                value={bookInfo.worldbuilding}
-                onChange={(e) => handleBookPlanningFieldChange('worldbuilding', e.target.value)}
-                placeholder={bookInfo.isTitleSelected ? "点击右上角按钮生成，或手动填写..." : "请先选择书名后再填写世界观"}
-                disabled={!bookInfo.isTitleSelected}
-                className="w-full ui-input"
-              />
-            </div>
-          </div>
-          
-          {/* 引导提示 */}
-          {!bookInfo.isTitleSelected && (
-            <div className="ui-seed-tip p-4">
-              <p className="text-sm text-[var(--ui-muted)]">
-                先选择主题和篇幅，再点击“AI 构思书名”。确定书名后，就可以继续生成大纲与世界观。
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  };
+  const renderBookInfo = () => (
+    <BookPanel
+      mode={mode}
+      settings={settings}
+      isTaskBusy={isTaskBusy}
+      isGenerating={isGenerating}
+      pushToast={pushToast}
+      bookInfo={bookInfo}
+      setBookInfo={setBookInfo}
+      characters={characters}
+      setCharacters={setCharacters}
+      realmProgress={realmProgress}
+      setRealmProgress={setRealmProgress}
+      toc={toc}
+      setToc={setToc}
+      chapters={chapters}
+      shortStoryInfo={shortStoryInfo}
+      setShortStoryInfo={setShortStoryInfo}
+      shortStoryTitleOptions={shortStoryTitleOptions}
+      setShortStoryTitleOptions={setShortStoryTitleOptions}
+      tocCompact={tocCompact}
+      setTocCompact={setTocCompact}
+      tocMenuOpen={tocMenuOpen}
+      setTocMenuOpen={setTocMenuOpen}
+      activeChapterNum={activeChapterNum}
+      setActiveChapterNum={setActiveChapterNum}
+      setActiveTab={setActiveTab}
+      chapterQualityNotes={chapterQualityNotes}
+      batchFailedChapters={batchFailedChapters}
+      getRealmSystemLabel={getRealmSystemLabel}
+      themesRecommendRealms={themesRecommendRealms}
+      handleGenerateBookTitles={handleGenerateBookTitles}
+      handleGenerateBookInfo={handleGenerateBookInfo}
+      handleSelectTitle={handleSelectBookTitle}
+      handleBookThemesChange={handleBookThemesChange}
+      handleBookTitleInput={handleBookTitleInput}
+      handleBookPlanningFieldChange={handleBookPlanningFieldChange}
+      handleLengthChange={handleLengthChange}
+      handleGenerateCharacters={handleGenerateCharacters}
+      handleAddCharacter={handleAddCharacter}
+      handleDeleteCharacter={handleDeleteCharacter}
+      handleUpdateCharacter={handleUpdateCharacter}
+      handleGenerateRealms={handleGenerateRealms}
+      handleGenerateTOC={handleGenerateTOC}
+      handleGenerateSingleChapterOutline={handleGenerateSingleChapterOutline}
+      handleRegenerateChapterOutline={handleRegenerateChapterOutline}
+      handleDeleteChapterOutline={handleDeleteTOCItem}
+      handleGenerateShortStoryTitles={handleGenerateShortStoryTitles}
+      handleGenerateShortStoryOutline={handleGenerateShortStoryOutline}
+      handleGenerateChapter={handleGenerateChapter}
+    />
+  );
 
   const renderCharacters = () => (
-    <div className="max-w-4xl mx-auto space-y-6">
-      <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-semibold text-[var(--ui-ink)]">人物关系</h2>
-        <div className="flex gap-2">
-          <button
-            onClick={handleAddCharacter}
-            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-stone-700 bg-stone-100 rounded-lg hover:bg-stone-200 transition-colors"
-          >
-            <Users className="w-4 h-4" />
-            添加人物
-          </button>
-          <button
-            onClick={handleGenerateCharacters}
-            disabled={isGenerating || !bookInfo.title}
-            className="ui-btn-primary disabled:opacity-70"
-          >
-            {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
-            AI 生成人物
-          </button>
-        </div>
-      </div>
-
-      {(!characters || characters.length === 0) ? (
-        <div className="ui-empty">
-          <Users className="w-12 h-12 text-[rgba(196,92,38,0.45)] mx-auto mb-3" />
-          <p className="text-[var(--ui-muted)]">暂无人物设定，请点击右上角生成或手动添加。</p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {characters.map((char, idx) => (
-            <div key={char.id || idx} className="ui-card p-5">
-              <div className="flex items-center justify-between mb-3">
-                <input 
-                  type="text" 
-                  value={char.name}
-                  onChange={(e) => handleUpdateCharacter(char.id, 'name', e.target.value)}
-                  placeholder="角色姓名"
-                  className="font-semibold text-lg text-[var(--ui-ink)] bg-transparent border-none focus:ring-0 p-0 w-32"
-                />
-                <div className="flex items-center gap-2">
-                  <input 
-                    type="text" 
-                    value={char.role}
-                    onChange={(e) => handleUpdateCharacter(char.id, 'role', e.target.value)}
-                    placeholder="角色定位"
-                    className="text-xs font-medium px-2 py-1 bg-[var(--ui-accent-soft)] text-[var(--ui-accent-text)] rounded-full border-none focus:ring-0 text-right w-24"
-                  />
-                  <button
-                    onClick={() => handleDeleteCharacter(char.id)}
-                    className="p-1 text-[var(--ui-muted)] hover:text-red-500 transition-colors"
-                    title="删除人物"
-                  >
-                    ×
-                  </button>
-                </div>
-              </div>
-              <textarea 
-                value={char.description}
-                onChange={(e) => handleUpdateCharacter(char.id, 'description', e.target.value)}
-                placeholder="角色描述（性格、背景、关系等）"
-                className="w-full text-sm text-stone-600 bg-stone-50 border border-stone-100 rounded-lg p-3 h-24 resize-none focus:outline-none focus:ring-1 focus:ring-[rgba(196,92,38,0.15)]"
-              />
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
+    <CharactersPanel
+      mode={mode}
+      settings={settings}
+      isTaskBusy={isTaskBusy}
+      isGenerating={isGenerating}
+      pushToast={pushToast}
+      bookInfo={bookInfo}
+      setBookInfo={setBookInfo}
+      characters={characters}
+      setCharacters={setCharacters}
+      realmProgress={realmProgress}
+      setRealmProgress={setRealmProgress}
+      toc={toc}
+      setToc={setToc}
+      chapters={chapters}
+      shortStoryInfo={shortStoryInfo}
+      setShortStoryInfo={setShortStoryInfo}
+      shortStoryTitleOptions={shortStoryTitleOptions}
+      setShortStoryTitleOptions={setShortStoryTitleOptions}
+      tocCompact={tocCompact}
+      setTocCompact={setTocCompact}
+      tocMenuOpen={tocMenuOpen}
+      setTocMenuOpen={setTocMenuOpen}
+      activeChapterNum={activeChapterNum}
+      setActiveChapterNum={setActiveChapterNum}
+      setActiveTab={setActiveTab}
+      chapterQualityNotes={chapterQualityNotes}
+      batchFailedChapters={batchFailedChapters}
+      getRealmSystemLabel={getRealmSystemLabel}
+      themesRecommendRealms={themesRecommendRealms}
+      handleGenerateBookTitles={handleGenerateBookTitles}
+      handleGenerateBookInfo={handleGenerateBookInfo}
+      handleSelectTitle={handleSelectBookTitle}
+      handleBookThemesChange={handleBookThemesChange}
+      handleBookTitleInput={handleBookTitleInput}
+      handleBookPlanningFieldChange={handleBookPlanningFieldChange}
+      handleLengthChange={handleLengthChange}
+      handleGenerateCharacters={handleGenerateCharacters}
+      handleAddCharacter={handleAddCharacter}
+      handleDeleteCharacter={handleDeleteCharacter}
+      handleUpdateCharacter={handleUpdateCharacter}
+      handleGenerateRealms={handleGenerateRealms}
+      handleGenerateTOC={handleGenerateTOC}
+      handleGenerateSingleChapterOutline={handleGenerateSingleChapterOutline}
+      handleRegenerateChapterOutline={handleRegenerateChapterOutline}
+      handleDeleteChapterOutline={handleDeleteTOCItem}
+      handleGenerateShortStoryTitles={handleGenerateShortStoryTitles}
+      handleGenerateShortStoryOutline={handleGenerateShortStoryOutline}
+      handleGenerateChapter={handleGenerateChapter}
+    />
   );
 
-  const renderRealms = () => {
-    if (mode === 'shortStory') return null;
-    const protagonist = characters.find(c => c.role === '主角');
-    const protagName = protagonist?.name || '主角';
+  const renderRealms = () => (
+    <RealmsPanel
+      mode={mode}
+      settings={settings}
+      isTaskBusy={isTaskBusy}
+      isGenerating={isGenerating}
+      pushToast={pushToast}
+      bookInfo={bookInfo}
+      setBookInfo={setBookInfo}
+      characters={characters}
+      setCharacters={setCharacters}
+      realmProgress={realmProgress}
+      setRealmProgress={setRealmProgress}
+      toc={toc}
+      setToc={setToc}
+      chapters={chapters}
+      shortStoryInfo={shortStoryInfo}
+      setShortStoryInfo={setShortStoryInfo}
+      shortStoryTitleOptions={shortStoryTitleOptions}
+      setShortStoryTitleOptions={setShortStoryTitleOptions}
+      tocCompact={tocCompact}
+      setTocCompact={setTocCompact}
+      tocMenuOpen={tocMenuOpen}
+      setTocMenuOpen={setTocMenuOpen}
+      activeChapterNum={activeChapterNum}
+      setActiveChapterNum={setActiveChapterNum}
+      setActiveTab={setActiveTab}
+      chapterQualityNotes={chapterQualityNotes}
+      batchFailedChapters={batchFailedChapters}
+      getRealmSystemLabel={getRealmSystemLabel}
+      themesRecommendRealms={themesRecommendRealms}
+      handleGenerateBookTitles={handleGenerateBookTitles}
+      handleGenerateBookInfo={handleGenerateBookInfo}
+      handleSelectTitle={handleSelectBookTitle}
+      handleBookThemesChange={handleBookThemesChange}
+      handleBookTitleInput={handleBookTitleInput}
+      handleBookPlanningFieldChange={handleBookPlanningFieldChange}
+      handleLengthChange={handleLengthChange}
+      handleGenerateCharacters={handleGenerateCharacters}
+      handleAddCharacter={handleAddCharacter}
+      handleDeleteCharacter={handleDeleteCharacter}
+      handleUpdateCharacter={handleUpdateCharacter}
+      handleGenerateRealms={handleGenerateRealms}
+      handleGenerateTOC={handleGenerateTOC}
+      handleGenerateSingleChapterOutline={handleGenerateSingleChapterOutline}
+      handleRegenerateChapterOutline={handleRegenerateChapterOutline}
+      handleDeleteChapterOutline={handleDeleteTOCItem}
+      handleGenerateShortStoryTitles={handleGenerateShortStoryTitles}
+      handleGenerateShortStoryOutline={handleGenerateShortStoryOutline}
+      handleGenerateChapter={handleGenerateChapter}
+    />
+  );
 
-    return (
-      <div className="max-w-4xl mx-auto space-y-6">
-        <div className="flex justify-between items-center mb-6">
-          <h2 className="text-2xl font-semibold text-[var(--ui-ink)]">{getRealmSystemLabel(bookInfo.themes).title}</h2>
-          <button
-            onClick={handleGenerateRealms}
-            disabled={isGenerating || !bookInfo.title || !characters || characters.length === 0}
-            className="ui-btn-primary disabled:opacity-70"
-          >
-            {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
-            {getRealmSystemLabel(bookInfo.themes).generateLabel}
-          </button>
-        </div>
-
-        {realmProgress.realms.length === 0 ? (
-          <div className="ui-empty">
-            <Globe className="w-12 h-12 text-[rgba(196,92,38,0.45)] mx-auto mb-3" />
-            <p className="text-[var(--ui-muted)]">暂无规则体系，请先生成人物后点击右上角生成。</p>
-            <p className="text-xs text-[var(--ui-muted)] mt-1">{getRealmSystemLabel(bookInfo.themes).hint}</p>
-          </div>
-        ) : (
-          <>
-            {/* 当前境界概览 */}
-            <div className="bg-gradient-to-r from-[var(--ui-accent-soft)] to-[#faf6f0] p-4 rounded-xl border border-[rgba(196,92,38,0.2)]">
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-sm text-[var(--ui-accent-text)]">主角{protagName}境界体系</span>
-                  <div className="text-2xl font-bold text-[var(--ui-accent-text)] mt-1">
-                    {realmProgress.realms.length} 阶境界
-                  </div>
-                </div>
-                <div className="text-right">
-                  <span className="text-sm text-[var(--ui-accent-text)]">自动分配</span>
-                  <div className="text-lg font-semibold text-[var(--ui-accent-text)] mt-1">
-                    {Object.keys(realmProgress.chapterRealmMap).length} 个突破节点
-                  </div>
-                </div>
-              </div>
-              <div className="mt-2 text-xs text-[var(--ui-accent)]">
-                境界按章节进度自动推进，生成章节时AI自动识别当前境界并融入剧情
-              </div>
-            </div>
-
-            {/* 境界列表 */}
-            <div className="space-y-3">
-              {realmProgress.realms.map((realm, idx) => {
-                const isStarting = idx === 0;
-                // 找到该大境界对应的所有突破章节
-                const realmBreakpoints = Object.entries(realmProgress.chapterRealmMap)
-                  .filter(([, val]) => (val as any).realmIndex === idx)
-                  .map(([ch, val]) => ({ ch: Number(ch), subIdx: (val as any).subRealmIndex }))
-                  .sort((a, b) => a.ch - b.ch);
-                const bigBreakthrough = realmBreakpoints.find(bp => bp.subIdx === 0);
-                return (
-                  <div key={realm.id} className={`p-4 rounded-xl border transition-all ${
-                    isStarting ? 'bg-green-50 border-green-200' :
-                    bigBreakthrough ? 'bg-amber-50 border-amber-200' :
-                    'bg-white border-stone-100'
-                  }`}>
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <span className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
-                          isStarting ? 'bg-green-600 text-white' :
-                          bigBreakthrough ? 'bg-amber-500 text-white' :
-                          'bg-stone-100 text-[var(--ui-muted)]'
-                        }`}>
-                          {realm.level}
-                        </span>
-                        <div>
-                          <span className={`font-semibold ${isStarting ? 'text-green-900' : bigBreakthrough ? 'text-amber-900' : 'text-stone-700'}`}>
-                            {realm.name}
-                          </span>
-                          {isStarting && <span className="ml-2 text-xs bg-green-600 text-white px-2 py-0.5 rounded-full">起始</span>}
-                          {bigBreakthrough && <span className="ml-2 text-xs bg-amber-500 text-white px-2 py-0.5 rounded-full">第{bigBreakthrough.ch}章突破</span>}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="mt-2 ml-11 text-sm text-stone-600">{realm.description}</div>
-                    {/* 小境界列表 */}
-                    {realm.subRealms && realm.subRealms.length > 0 && (
-                      <div className="mt-2 ml-11 flex flex-wrap gap-1.5">
-                        {realm.subRealms.map((sub, si) => {
-                          const subBp = realmBreakpoints.find(bp => bp.subIdx === si);
-                          const isStartSub = isStarting && si === 0;
-                          return (
-                            <span key={si} className={`text-xs px-2 py-1 rounded-full border ${
-                              isStartSub ? 'bg-green-100 text-green-700 border-green-300' :
-                              subBp ? 'bg-amber-100 text-amber-700 border-amber-300' :
-                              'bg-stone-50 text-[var(--ui-muted)] border-stone-200'
-                            }`}>
-                              {sub.name}{subBp ? `·第${subBp.ch}章` : isStartSub ? '·起始' : ''}
-                            </span>
-                          );
-                        })}
-                      </div>
-                    )}
-                    {realm.breakthroughCondition && idx < realmProgress.realms.length - 1 && (
-                      <div className="mt-1 ml-11 text-xs text-amber-600">
-                        大境界突破条件：{realm.breakthroughCondition}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* 章节境界映射 */}
-            {Object.keys(realmProgress.chapterRealmMap).length > 0 && (
-              <div className="bg-white p-4 rounded-xl border border-stone-100">
-                <h3 className="font-semibold text-stone-800 mb-3">章节突破记录</h3>
-                <div className="flex flex-wrap gap-2">
-                  {Object.entries(realmProgress.chapterRealmMap)
-                    .sort(([a], [b]) => Number(a) - Number(b))
-                    .map(([ch, val]) => {
-                      const bp = val as any;
-                      const realm = realmProgress.realms[bp.realmIndex ?? bp];
-                      const subRealm = realm?.subRealms?.[bp.subRealmIndex ?? 0];
-                      const fullName = subRealm ? `${realm?.name}·${subRealm.name}` : realm?.name || '未知';
-                      const isBig = bp.subRealmIndex === 0 && bp.realmIndex > 0;
-                      return (
-                        <span key={ch} className={`text-xs px-2 py-1 rounded-full border ${
-                          isBig ? 'bg-amber-100 text-amber-800 border-amber-300 font-medium' :
-                          'bg-amber-50 text-amber-700 border-amber-200'
-                        }`}>
-                          第{ch}章 → {fullName}{isBig ? ' ★大境界' : ''}
-                        </span>
-                      );
-                    })}
-                </div>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    );
-  };
-
-  const renderTOC = () => {
-    if (mode === 'shortStory') return null;
-
-    const nextStart = toc.length + 1;
-    const nextEnd = Math.min(nextStart + 29, bookInfo.targetChapterCount);
-    const isComplete = toc.length >= bookInfo.targetChapterCount;
-    const progressPct = bookInfo.targetChapterCount
-      ? Math.min(100, Math.round((toc.length / bookInfo.targetChapterCount) * 100))
-      : 0;
-
-    return (
-      <div className="max-w-4xl mx-auto space-y-5">
-        <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
-          <div className="min-w-0">
-            <h2 className="text-xl font-semibold text-[var(--ui-ink)] tracking-tight">目录大纲</h2>
-            <div className="mt-2 flex items-center gap-3">
-              <div className="flex-1 max-w-xs h-1.5 bg-stone-100 rounded-full overflow-hidden">
-                <div className="h-full bg-[var(--ui-accent)]/80 rounded-full transition-all" style={{ width: `${progressPct}%` }} />
-              </div>
-              <span className="text-sm font-medium text-stone-600 tabular-nums shrink-0">
-                {toc.length} / {bookInfo.targetChapterCount} 章
-              </span>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="ui-seg">
-              <button
-                type="button"
-                onClick={() => setTocCompact(true)}
-                className={tocCompact ? 'ui-seg-active' : 'ui-seg-idle'}
-                title="紧凑列表"
-              >
-                <Rows3 className="w-3.5 h-3.5" />
-                紧凑
-              </button>
-              <button
-                type="button"
-                onClick={() => setTocCompact(false)}
-                className={!tocCompact ? 'ui-seg-active' : 'ui-seg-idle'}
-                title="卡片精修"
-              >
-                <LayoutList className="w-3.5 h-3.5" />
-                精修
-              </button>
-            </div>
-            <button
-              onClick={handleGenerateSingleChapterOutline}
-              disabled={isGenerating || !characters || characters.length === 0 || isComplete}
-              className="ui-btn-secondary disabled:opacity-70 disabled:cursor-not-allowed"
-            >
-              {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-              生成单章
-            </button>
-            <button
-              onClick={handleGenerateTOC}
-              disabled={isGenerating || !characters || characters.length === 0 || isComplete}
-              className="ui-btn-primary disabled:opacity-70 disabled:cursor-not-allowed"
-            >
-              {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
-              {isComplete ? '目录已全部生成' : `批量 (${nextStart}-${nextEnd})`}
-            </button>
-          </div>
-        </div>
-
-        {(!toc || toc.length === 0) ? (
-          <div className="ui-empty">
-            <List className="w-11 h-11 text-[rgba(196,92,38,0.45)] mx-auto mb-3" />
-            <p className="text-stone-600 font-medium">还没有目录大纲</p>
-            <p className="text-sm text-[var(--ui-muted)] mt-1">请先生成人物，再点击批量生成</p>
-          </div>
-        ) : tocCompact ? (
-          <div className="ui-card overflow-hidden divide-y divide-[rgba(181,69,85,.10)]">
-            {toc.map((item, idx) => (
-              <div
-                key={item.chapterNumber}
-                className="toc-row flex items-center gap-3 px-3 py-2.5 group"
-              >
-                <span className="toc-number w-9 shrink-0 text-center text-xs font-semibold tabular-nums">
-                  {item.chapterNumber}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <input
-                    type="text"
-                    value={item.title}
-                    onChange={(e) => {
-                      const newToc = [...toc];
-                      newToc[idx].title = e.target.value;
-                      setToc(newToc);
-                    }}
-                    className="w-full font-medium text-sm text-[var(--ui-ink)] bg-transparent border-none focus:ring-0 p-0 truncate"
-                    placeholder="章节标题"
-                  />
-                  <p className="text-xs text-[var(--ui-muted)] truncate mt-0.5">{item.summary || '暂无摘要'}</p>
-                </div>
-                {chapters[item.chapterNumber] && (
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" title="已有正文" />
-                )}
-                <div className="relative shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => setTocMenuOpen(tocMenuOpen === item.chapterNumber ? null : item.chapterNumber)}
-                    className="p-1.5 rounded-lg text-[var(--ui-muted)] hover:bg-stone-100 hover:text-stone-700"
-                    title="更多"
-                  >
-                    <MoreHorizontal className="w-4 h-4" />
-                  </button>
-                  {tocMenuOpen === item.chapterNumber && (
-                    <div className="absolute right-0 top-full mt-1 w-36 bg-white border border-stone-200 rounded-xl shadow-lg overflow-hidden z-30 py-1">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setActiveChapterNum(item.chapterNumber);
-                          setActiveTab('chapters');
-                          setTocMenuOpen(null);
-                        }}
-                        className="w-full px-3 py-2 text-sm text-left text-stone-700 hover:bg-stone-50"
-                      >
-                        前往正文
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          handleRegenerateChapterOutline(item.chapterNumber);
-                          setTocMenuOpen(null);
-                        }}
-                        disabled={isTaskBusy}
-                        className="w-full px-3 py-2 text-sm text-left text-amber-700 hover:bg-amber-50 disabled:opacity-50"
-                      >
-                        重新生成
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          handleDeleteTOCItem(item.chapterNumber);
-                          setTocMenuOpen(null);
-                        }}
-                        className="w-full px-3 py-2 text-sm text-left text-red-600 hover:bg-red-50"
-                      >
-                        删除
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {toc.map((item, idx) => (
-              <div key={item.chapterNumber} className="ui-card ui-toc-paper p-5 flex gap-4">
-                <div className="toc-number flex-shrink-0 w-12 h-12 flex items-center justify-center font-serif text-xl">
-                  {item.chapterNumber}
-                </div>
-                <div className="flex-1 space-y-2 min-w-0">
-                  <input
-                    type="text"
-                    value={item.title}
-                    onChange={(e) => {
-                      const newToc = [...toc];
-                      newToc[idx].title = e.target.value;
-                      setToc(newToc);
-                    }}
-                    className="w-full font-semibold text-[var(--ui-ink)] bg-transparent border-none focus:ring-0 p-0"
-                    placeholder="章节标题"
-                  />
-                  <textarea
-                    value={item.summary}
-                    onChange={(e) => {
-                      const newToc = [...toc];
-                      newToc[idx].summary = e.target.value;
-                      setToc(newToc);
-                    }}
-                    className="ui-input h-20 resize-none"
-                    placeholder="章节内容摘要"
-                  />
-                </div>
-                <div className="flex-shrink-0 flex flex-col gap-2">
-                  <button
-                    onClick={() => {
-                      setActiveChapterNum(item.chapterNumber);
-                      setActiveTab('chapters');
-                    }}
-                    className="px-3 py-1.5 text-xs font-medium text-[var(--ui-accent-text)] bg-[var(--ui-accent-soft)] rounded-lg hover:bg-[var(--ui-accent-soft)]"
-                  >
-                    前往正文
-                  </button>
-                  <button
-                    onClick={() => handleRegenerateChapterOutline(item.chapterNumber)}
-                    disabled={isTaskBusy}
-                    className="px-3 py-1.5 text-xs font-medium text-amber-700 bg-amber-50 rounded-lg hover:bg-amber-100 disabled:opacity-70"
-                  >
-                    {isGenerating ? <Loader2 className="w-3 h-3 animate-spin" /> : '重新生成'}
-                  </button>
-                  <button
-                    onClick={() => handleDeleteTOCItem(item.chapterNumber)}
-                    className="px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 rounded-lg hover:bg-red-100"
-                  >
-                    删除
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  };
+  const renderTOC = () => (
+    <TocPanel
+      mode={mode}
+      settings={settings}
+      isTaskBusy={isTaskBusy}
+      isGenerating={isGenerating}
+      pushToast={pushToast}
+      bookInfo={bookInfo}
+      setBookInfo={setBookInfo}
+      characters={characters}
+      setCharacters={setCharacters}
+      realmProgress={realmProgress}
+      setRealmProgress={setRealmProgress}
+      toc={toc}
+      setToc={setToc}
+      chapters={chapters}
+      shortStoryInfo={shortStoryInfo}
+      setShortStoryInfo={setShortStoryInfo}
+      shortStoryTitleOptions={shortStoryTitleOptions}
+      setShortStoryTitleOptions={setShortStoryTitleOptions}
+      tocCompact={tocCompact}
+      setTocCompact={setTocCompact}
+      tocMenuOpen={tocMenuOpen}
+      setTocMenuOpen={setTocMenuOpen}
+      activeChapterNum={activeChapterNum}
+      setActiveChapterNum={setActiveChapterNum}
+      setActiveTab={setActiveTab}
+      chapterQualityNotes={chapterQualityNotes}
+      batchFailedChapters={batchFailedChapters}
+      getRealmSystemLabel={getRealmSystemLabel}
+      themesRecommendRealms={themesRecommendRealms}
+      handleGenerateBookTitles={handleGenerateBookTitles}
+      handleGenerateBookInfo={handleGenerateBookInfo}
+      handleSelectTitle={handleSelectBookTitle}
+      handleBookThemesChange={handleBookThemesChange}
+      handleBookTitleInput={handleBookTitleInput}
+      handleBookPlanningFieldChange={handleBookPlanningFieldChange}
+      handleLengthChange={handleLengthChange}
+      handleGenerateCharacters={handleGenerateCharacters}
+      handleAddCharacter={handleAddCharacter}
+      handleDeleteCharacter={handleDeleteCharacter}
+      handleUpdateCharacter={handleUpdateCharacter}
+      handleGenerateRealms={handleGenerateRealms}
+      handleGenerateTOC={handleGenerateTOC}
+      handleGenerateSingleChapterOutline={handleGenerateSingleChapterOutline}
+      handleRegenerateChapterOutline={handleRegenerateChapterOutline}
+      handleDeleteChapterOutline={handleDeleteTOCItem}
+      handleGenerateShortStoryTitles={handleGenerateShortStoryTitles}
+      handleGenerateShortStoryOutline={handleGenerateShortStoryOutline}
+      handleGenerateChapter={handleGenerateChapter}
+    />
+  );
 
   const renderExamples = () => (
-    <div className="max-w-4xl mx-auto space-y-6">
-      <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-semibold text-[var(--ui-ink)]">小说范文参考</h2>
-        <p className="text-sm text-[var(--ui-muted)]">点击下方链接阅读优秀小说示例</p>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {EXAMPLE_LINKS.map((link, idx) => (
-          <a
-            key={idx}
-            href={link.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="bg-white p-5 rounded-2xl shadow-sm border border-stone-100 hover:border-amber-300 hover:shadow-md transition-all group"
-          >
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-amber-50 rounded-xl flex items-center justify-center group-hover:bg-amber-100 transition-colors">
-                <BookOpen className="w-5 h-5 text-amber-600" />
-              </div>
-              <div className="flex-1">
-                <h3 className="font-medium text-[var(--ui-ink)] group-hover:text-amber-700 transition-colors">{link.title}</h3>
-                <p className="text-xs text-[var(--ui-muted)] truncate">{link.url}</p>
-              </div>
-              <Globe className="w-4 h-4 text-[var(--ui-muted)] group-hover:text-amber-500 transition-colors" />
-            </div>
-          </a>
-        ))}
-      </div>
-
-      <div className="bg-amber-50 p-4 rounded-xl border border-amber-100 mt-6">
-        <p className="text-sm text-amber-800">
-          💡 提示：阅读优秀范文可以帮助你更好地理解小说结构、人物塑造和情节设计。建议在创作前先浏览这些示例获取灵感。
-        </p>
-      </div>
-    </div>
+    <ExamplesPanel
+      mode={mode}
+      settings={settings}
+      isTaskBusy={isTaskBusy}
+      isGenerating={isGenerating}
+      pushToast={pushToast}
+      bookInfo={bookInfo}
+      setBookInfo={setBookInfo}
+      characters={characters}
+      setCharacters={setCharacters}
+      realmProgress={realmProgress}
+      setRealmProgress={setRealmProgress}
+      toc={toc}
+      setToc={setToc}
+      chapters={chapters}
+      shortStoryInfo={shortStoryInfo}
+      setShortStoryInfo={setShortStoryInfo}
+      shortStoryTitleOptions={shortStoryTitleOptions}
+      setShortStoryTitleOptions={setShortStoryTitleOptions}
+      tocCompact={tocCompact}
+      setTocCompact={setTocCompact}
+      tocMenuOpen={tocMenuOpen}
+      setTocMenuOpen={setTocMenuOpen}
+      activeChapterNum={activeChapterNum}
+      setActiveChapterNum={setActiveChapterNum}
+      setActiveTab={setActiveTab}
+      chapterQualityNotes={chapterQualityNotes}
+      batchFailedChapters={batchFailedChapters}
+      getRealmSystemLabel={getRealmSystemLabel}
+      themesRecommendRealms={themesRecommendRealms}
+      handleGenerateBookTitles={handleGenerateBookTitles}
+      handleGenerateBookInfo={handleGenerateBookInfo}
+      handleSelectTitle={handleSelectBookTitle}
+      handleBookThemesChange={handleBookThemesChange}
+      handleBookTitleInput={handleBookTitleInput}
+      handleBookPlanningFieldChange={handleBookPlanningFieldChange}
+      handleLengthChange={handleLengthChange}
+      handleGenerateCharacters={handleGenerateCharacters}
+      handleAddCharacter={handleAddCharacter}
+      handleDeleteCharacter={handleDeleteCharacter}
+      handleUpdateCharacter={handleUpdateCharacter}
+      handleGenerateRealms={handleGenerateRealms}
+      handleGenerateTOC={handleGenerateTOC}
+      handleGenerateSingleChapterOutline={handleGenerateSingleChapterOutline}
+      handleRegenerateChapterOutline={handleRegenerateChapterOutline}
+      handleDeleteChapterOutline={handleDeleteTOCItem}
+      handleGenerateShortStoryTitles={handleGenerateShortStoryTitles}
+      handleGenerateShortStoryOutline={handleGenerateShortStoryOutline}
+      handleGenerateChapter={handleGenerateChapter}
+    />
   );
 
-  const renderChapters = () => {
-    if (mode === 'shortStory') {
-      return (
-        <div className="h-full min-h-0 max-w-5xl mx-auto w-full rounded-xl border border-stone-200 bg-white shadow-sm flex flex-col overflow-hidden">
-          <div className="p-4 border-b border-stone-200 flex justify-between items-center bg-white shrink-0 gap-2 flex-wrap">
-            <h3 className="font-semibold text-lg text-[var(--ui-ink)]">
-              {shortStoryInfo.title || '未命名短篇'}
-            </h3>
-            <div className="flex items-center gap-2">
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={() => setShowShortResetMenu(v => !v)}
-                  className="ui-btn-secondary"
-                >
-                  <RefreshCw className="w-4 h-4" />
-                  重置
-                  <ChevronDown className={`w-3 h-3 transition-transform ${showShortResetMenu ? 'rotate-180' : ''}`} />
-                </button>
-                {showShortResetMenu && (
-                  <div className="ui-menu right-0 top-full mt-1 w-48">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (confirm('确定要清空当前正文内容吗？保留标题和大纲。')) {
-                          setShortStoryInfo({ ...shortStoryInfo, content: '', currentSegment: 0, segments: (shortStoryInfo.segments || []).map(s => ({ ...s, content: '', isGenerated: false })) });
-                          setShowShortResetMenu(false);
-                        }
-                      }}
-                      className="ui-menu-item"
-                    >
-                      仅清空正文
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (confirm('确定要重置整个故事吗？这将清空标题、大纲、正文等所有内容，但保留API设置。')) {
-                          setShortStoryInfo({
-                            title: '',
-                            themes: [SHORT_STORY_THEME_NAMES[0]],
-                            targetWordCount: 10000,
-                            outline: '',
-                            content: '',
-                            segments: [],
-                            currentSegment: 0,
-                            isOutlineGenerated: false
-                          });
-                          setShortStoryTitleOptions([]);
-                          setShowShortResetMenu(false);
-                        }
-                      }}
-                      className="ui-menu-item text-red-600 hover:bg-red-50"
-                    >
-                      重置所有故事信息
-                    </button>
-                  </div>
-                )}
-              </div>
-              <div className="flex gap-2 flex-wrap">
-                <button
-                  onClick={() => handleGenerateShortStoryContent({})}
-                  disabled={isGenerating || (!shortStoryInfo.outline && !(shortStoryInfo.segments?.length))}
-                  className="ui-btn-primary disabled:opacity-70"
-                >
-                  {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
-                  {shortStoryInfo.segments?.length
-                    ? ((shortStoryInfo.segments.findIndex(s => !s.isGenerated) < 0)
-                      ? '全部分段已写完'
-                      : `生成当前段：${shortStoryInfo.segments.find(s => !s.isGenerated)?.title || '下一段'}`)
-                    : (shortStoryInfo.content ? '继续写' : '开始生成')}
-                </button>
-                {!!shortStoryInfo.content && (
-                  <button
-                    onClick={() => handleGenerateShortStoryContent({ forceFinal: true })}
-                    disabled={isTaskBusy}
-                    className="ui-btn-secondary disabled:opacity-70"
-                  >
-                    {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Feather className="w-4 h-4" />}
-                    生成结局（收尾）
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-          {/* 分段结构工作台 */}
-          {(shortStoryInfo.segments?.length > 0 || shortStoryInfo.content) && (
-            <div className="px-4 py-3 bg-[var(--ui-accent-soft)] border-b border-[rgba(196,92,38,0.2)] space-y-2">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <span className="text-sm text-[var(--ui-accent-text)]">
-                  短篇结构 · 总字数 {shortStoryInfo.content.length} 字
-                  {shortStoryInfo.segments?.length ? ` · 已完成 ${shortStoryInfo.segments.filter(s => s.isGenerated).length}/${shortStoryInfo.segments.length} 段` : ''}
-                </span>
-                <span className="text-xs text-[var(--ui-accent)]">逐段生成 · 可单独重写 · 末段自动收尾</span>
-              </div>
-              {shortStoryInfo.segments?.length > 0 && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                  {shortStoryInfo.segments.map((seg, idx) => (
-                    <div key={seg.segmentNumber} className="ui-card p-3 flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium text-[var(--ui-ink)]">
-                          {seg.segmentNumber}. {seg.title}
-                          <span className={`ml-2 text-xs ${seg.isGenerated ? 'text-[var(--ui-success)]' : 'text-[var(--ui-muted)]'}`}>
-                            {seg.isGenerated ? '已写' : '未写'}
-                          </span>
-                        </div>
-                        <p className="text-xs text-[var(--ui-muted)] mt-1 line-clamp-2">{seg.summary}</p>
-                      </div>
-                      <div className="flex flex-col gap-1 shrink-0">
-                        <button
-                          type="button"
-                          disabled={isTaskBusy}
-                          onClick={() => handleGenerateShortStoryContent({ segmentIndex: idx, rewrite: seg.isGenerated })}
-                          className="ui-btn-ghost text-xs disabled:opacity-50"
-                        >
-                          {seg.isGenerated ? '重写本段' : '生成本段'}
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-          
-                    <div className="px-4 py-2 border-b border-stone-100 flex items-center gap-2 bg-white shrink-0">
-            <div className="ui-seg">
-              <button
-                type="button"
-                onClick={() => setChapterReadMode(true)}
-                className={chapterReadMode ? 'ui-seg-active' : 'ui-seg-idle'}
-              >
-                阅读
-              </button>
-              <button
-                type="button"
-                onClick={() => setChapterReadMode(false)}
-                className={!chapterReadMode ? 'ui-seg-active' : 'ui-seg-idle'}
-              >
-                编辑
-              </button>
-            </div>
-            <span className="text-xs text-[var(--ui-muted)]">同一份正文，仅切换展示</span>
-          </div>
-          <div className="flex-1 min-h-0 p-4 md:p-6 overflow-y-auto bg-white/20">
-            {shortStoryInfo.content ? (
-              chapterReadMode ? (
-                <div className="ui-prose-read py-2">{shortStoryInfo.content}</div>
-              ) : (
-                <textarea
-                  value={shortStoryInfo.content}
-                  onChange={(e) => setShortStoryInfo({ ...shortStoryInfo, content: e.target.value })}
-                  placeholder="在此编辑正文…"
-                  className="ui-input w-full min-h-[calc(100vh-16rem)] max-w-3xl mx-auto block p-5 resize-y leading-7 bg-white"
-                />
-              )
-            ) : (
-              <div className="ui-empty min-h-[280px] flex flex-col items-center justify-center">
-                {isGenerating ? (
-                  <>
-                    <Loader2 className="w-10 h-10 mb-3 animate-spin text-[var(--ui-accent)]" />
-                    <p className="text-[var(--ui-muted)]">AI 正在写作…</p>
-                  </>
-                ) : (
-                  <>
-                    <FileText className="w-10 h-10 mb-3 text-stone-300" />
-                    <p className="text-[var(--ui-muted)]">尚无正文</p>
-                    <p className="text-xs text-[var(--ui-muted)] mt-1">点击右上角开始生成，或切换到编辑后手动输入</p>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      );
-    }
+  const renderChapters = () => (
+    <ChaptersPanel
+      mode={mode}
+      shortStoryInfo={shortStoryInfo}
+      setShortStoryInfo={setShortStoryInfo}
+      setShortStoryTitleOptions={setShortStoryTitleOptions}
+      showShortResetMenu={showShortResetMenu}
+      setShowShortResetMenu={setShowShortResetMenu}
+      chapterReadMode={chapterReadMode}
+      setChapterReadMode={setChapterReadMode}
+      toc={toc}
+      chapters={chapters}
+      setChapters={setChapters}
+      activeChapterNum={activeChapterNum}
+      setActiveChapterNum={setActiveChapterNum}
+      chapterQualityNotes={chapterQualityNotes}
+      setChapterQualityNotes={setChapterQualityNotes}
+      batchFailedChapters={batchFailedChapters}
+      isTaskBusy={isTaskBusy}
+      isGenerating={isGenerating}
+      isBatchGenerating={isBatchGenerating}
+      generatingChapterNum={generatingChapterNum}
+      onGenerateShort={handleGenerateShortStoryContent}
+      onGenerateChapter={handleGenerateChapter}
+      onChapterAction={(n, action) => handleGenerateChapter(n, action)}
+      onDeleteChapter={handleDeleteChapter}
+      onBatchGenerate={handleBatchGenerateChapters}
+      onStopBatch={handleStopBatchGenerate}
+      onFillMissingChapters={() => handleBatchGenerateChapters({ onlyMissing: true, limit: 50 })}
+      onRewriteByQuality={handleRewriteChapterByQuality}
+      onPipelineToToc={handlePipelineToToc}
+      minWordCount={settings.minWordCount || 2000}
+      targetChapterCount={bookInfo.targetChapterCount || 0}
+    />
+  );
 
-    return (
-      <div className="ui-chapter-workspace flex h-full min-h-0 overflow-hidden">
-        <div className="ui-chapter-rail w-56 md:w-64 shrink-0 flex flex-col">
-          <div className="px-3 py-2.5 border-b border-[var(--ui-line)] flex justify-between items-center shrink-0">
-            <h3 className="font-medium text-[var(--ui-ink)] text-sm">章节列表</h3>
-            <span className="text-[11px] text-[var(--ui-muted)] tabular-nums">{toc.filter(t => chapters[t.chapterNumber]).length}/{toc.length}</span>
-          </div>
-          <div className="flex-1 py-1.5 space-y-0.5 overflow-y-auto min-h-0 px-1.5">
-            {toc.length === 0 ? (
-              <div className="ui-empty !py-8 !mx-1 !border-0 bg-transparent">
-                <List className="w-8 h-8 text-stone-300 mx-auto mb-2" />
-                <p className="text-xs text-[var(--ui-muted)]">请先生成目录</p>
-              </div>
-            ) : (
-              toc.map(item => (
-                <div
-                  key={item.chapterNumber}
-                  className={`group flex items-center gap-1 px-2 py-1.5 rounded-lg text-sm transition-colors border ${
-                    activeChapterNum === item.chapterNumber
-                      ? 'bg-[var(--ui-accent-soft)] text-[var(--ui-accent-text)] font-medium border-[rgba(181,69,85,.26)]'
-                      : 'text-stone-600 border-transparent hover:bg-white/65 hover:border-white/70'
-                  }`}
-                >
-                  <button
-                    onClick={() => setActiveChapterNum(item.chapterNumber)}
-                    className="flex-1 text-left truncate flex items-center gap-2 min-w-0"
-                  >
-                    {generatingChapterNum === item.chapterNumber && <Loader2 className="w-3 h-3 animate-spin text-[var(--ui-accent)] shrink-0" />}
-                    <span className="truncate">第{item.chapterNumber}章 {item.title}</span>
-                  </button>
-                  <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-                    {!chapters[item.chapterNumber] && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleGenerateChapter(item.chapterNumber);
-                        }}
-                        disabled={isTaskBusy}
-                        className="p-1 text-[var(--ui-accent-text)] hover:bg-[var(--ui-accent-soft)] rounded"
-                        title="生成内容"
-                      >
-                        <Wand2 className="w-3.5 h-3.5" />
-                      </button>
-                    )}
-                    {chapters[item.chapterNumber] && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeleteChapter(item.chapterNumber);
-                        }}
-                        className="p-1 text-red-400 hover:bg-red-50 hover:text-red-600 rounded"
-                        title="删除内容"
-                      >
-                        ×
-                      </button>
-                    )}
-                  </div>
-                  {chapters[item.chapterNumber] && <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />}
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-
-        <div className="flex-1 flex flex-col min-w-0 bg-white/32">
-          {activeChapterNum ? (
-            <>
-              <div className="px-4 py-3 border-b border-[var(--ui-line)] flex flex-wrap justify-between items-center gap-2 bg-white/46 backdrop-blur-sm">
-                <h3 className="font-semibold text-base text-[var(--ui-ink)] min-w-0 truncate">
-                  第{activeChapterNum}章 {toc.find(t => t.chapterNumber === activeChapterNum)?.title}
-                </h3>
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="ui-seg">
-                    <button
-                      type="button"
-                      onClick={() => setChapterReadMode(true)}
-                      className={chapterReadMode ? 'ui-seg-active' : 'ui-seg-idle'}
-                      title="阅读模式"
-                    >
-                      阅读
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setChapterReadMode(false)}
-                      className={!chapterReadMode ? 'ui-seg-active' : 'ui-seg-idle'}
-                      title="编辑模式"
-                    >
-                      编辑
-                    </button>
-                  </div>
-                  <button
-                    onClick={isBatchGenerating ? handleStopBatchGenerate : () => handleBatchGenerateChapters()}
-                    disabled={isTaskBusy && !isBatchGenerating}
-                    className="ui-btn-secondary disabled:opacity-70"
-                  >
-                    <Play className="w-4 h-4" />
-                    {isBatchGenerating ? '停止批量' : '批量下20章'}
-                  </button>
-                  {chapters[activeChapterNum] && (
-                    <button
-                      onClick={() => handleDeleteChapter(activeChapterNum)}
-                      className="ui-btn-ghost text-red-600 hover:bg-red-50"
-                    >
-                      删除本章
-                    </button>
-                  )}
-                  <button
-                    onClick={() => handleGenerateChapter(activeChapterNum)}
-                    disabled={isTaskBusy}
-                    className="ui-btn-primary disabled:opacity-70"
-                  >
-                    {isGenerating && generatingChapterNum === activeChapterNum ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
-                    {chapters[activeChapterNum] ? '重新生成' : '生成本章'}
-                  </button>
-                </div>
-              </div>
-              <div className="flex-1 min-h-0 p-4 md:p-6 overflow-y-auto bg-white/20">
-                {chapters[activeChapterNum] ? (
-                  chapterReadMode ? (
-                    <div className="ui-prose-read py-4">{chapters[activeChapterNum]}</div>
-                  ) : (
-                    <textarea
-                      value={chapters[activeChapterNum]}
-                      onChange={(e) => setChapters(prev => ({ ...prev, [activeChapterNum]: e.target.value }))}
-                      className="ui-input w-full h-full min-h-[calc(100vh-14rem)] max-w-3xl mx-auto block p-5 resize-y leading-7 bg-white"
-                    />
-                  )
-                ) : (
-                  <div className="ui-empty min-h-[280px] flex flex-col items-center justify-center m-2">
-                    {generatingChapterNum === activeChapterNum ? (
-                      <>
-                        <Loader2 className="w-10 h-10 mb-3 animate-spin text-[var(--ui-accent)]" />
-                        <p className="text-[var(--ui-muted)]">正在生成本章…</p>
-                        <p className="text-xs text-[var(--ui-muted)] mt-1">顶栏「生成中」为全局状态</p>
-                      </>
-                    ) : (
-                      <>
-                        <FileText className="w-10 h-10 mb-3 text-stone-300" />
-                        <p className="text-[var(--ui-muted)]">本章尚无正文</p>
-                        <p className="text-xs text-[var(--ui-muted)] mt-1">点击右上角「生成本章」或左侧魔法棒</p>
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-            </>
-          ) : (
-            <div className="ui-empty m-6 min-h-[280px] flex flex-col items-center justify-center">
-              <BookOpen className="w-10 h-10 mb-3 text-stone-300" />
-              <p className="text-[var(--ui-muted)]">请在左侧选择一个章节</p>
-              <p className="text-xs text-[var(--ui-muted)] mt-1">有绿点表示已写正文</p>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  };
 
   const handleReset = async () => {
     if (showResetConfirm) {
@@ -3145,7 +2136,8 @@ const handleBatchGenerateChapters = async (opts?: { onlyFailed?: boolean; limit?
         { id: 'characters', icon: Users, label: '人物关系' },
         ...(bookInfo.enableRealms !== false ? [{ id: 'realms', icon: Globe, label: getRealmSystemLabel(bookInfo.themes).title }] : []),
         { id: 'toc', icon: List, label: '大纲目录' },
-        { id: 'chapters', icon: FileText, label: '章节内容' },
+        { id: 'memory', icon: BookOpen, label: '作品记忆' },
+    { id: 'chapters', icon: FileText, label: '章节内容' },
       ]
     : [
         { id: 'settings', icon: SettingsIcon, label: '设置' },
@@ -3164,249 +2156,122 @@ const handleBatchGenerateChapters = async (opts?: { onlyFailed?: boolean; limit?
 
   return (
     <div className="flex h-screen text-[var(--ui-ink)] font-sans overflow-hidden bg-transparent">
-      {/* Main Sidebar - glass, full height, tools expanded */}
-      <aside className="ui-sidebar-panel w-[4.75rem] md:w-64 lg:w-72 flex flex-col h-full shrink-0">
-        <div className="h-14 flex items-center justify-center md:justify-start md:px-4 border-b border-[var(--ui-line)] shrink-0">
-          <div className="ui-logo-mark">
-            <BookOpen className="w-4 h-4 text-white shrink-0" />
-          </div>
-          <div className="ml-2.5 hidden md:block min-w-0">
-            <h1 className="font-semibold text-[15px] tracking-tight text-[var(--ui-ink)] leading-tight">小说家</h1>
-            <p className="text-[10px] text-[var(--ui-muted)] leading-tight mt-0.5">绯雾书房 · 写作工作台</p>
-          </div>
-        </div>
-
-        <div className="p-3 border-b border-[var(--ui-line)] shrink-0">
-          <div className="ui-mode-switch">
-            <button type="button" onClick={() => { setMode('novel'); setActiveTab('book'); }} className={mode === 'novel' ? 'ui-mode-active' : 'ui-mode-idle'}>长篇</button>
-            <button type="button" onClick={() => { setMode('shortStory'); setActiveTab('book'); }} className={mode === 'shortStory' ? 'ui-mode-active' : 'ui-mode-idle'}>短篇</button>
-          </div>
-        </div>
-
-        <div className="ui-progress-card hidden md:block">
-          <div className="flex items-center justify-between gap-2 mb-2">
-            <span className="text-[11px] font-semibold text-[var(--ui-ink)]">创作进度</span>
-            <span className="text-[11px] tabular-nums text-[var(--ui-accent-text)]">
-              {mode === 'novel' ? `${novelProgress.doneSteps}/4` : `${shortProgress.doneSteps}/4`}
-            </span>
-          </div>
-          <div className="ui-progress-track">
-            <div
-              className="ui-progress-fill"
-              style={{ width: `${Math.round((mode === 'novel' ? novelProgress.score : shortProgress.score) * 100)}%` }}
-            />
-          </div>
-          <p className="text-[10px] leading-relaxed text-[var(--ui-muted)] mt-2">
-            {mode === 'novel' ? novelProgress.nextHint : shortProgress.nextHint}
-          </p>
-          {mode === 'novel' && novelProgress.tocCount > 0 && (
-            <p className="text-[10px] text-[var(--ui-muted)] mt-1 tabular-nums">
-              目录 {novelProgress.tocCount} · 正文 {novelProgress.written}/{novelProgress.target}
-            </p>
-          )}
-          {mode === 'shortStory' && (
-            <p className="text-[10px] text-[var(--ui-muted)] mt-1 tabular-nums">
-              {shortProgress.segTotal > 0
-                ? `分段 ${shortProgress.doneSegs}/${shortProgress.segTotal} · ${shortProgress.words}/${shortProgress.target} 字`
-                : `${shortProgress.words}/${shortProgress.target} 字`}
-            </p>
-          )}
-        </div>
-
-        <div className="flex-1 min-h-0 flex flex-col overflow-y-auto">
-          <div className="px-3 pt-3 pb-1 hidden md:block shrink-0">
-            <p className="ui-side-label">写作流程</p>
-          </div>
-          <nav className="px-2.5 pb-2 space-y-1.5">
-            {navItems.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setActiveTab(item.id as Tab)}
-                className={`ui-side-btn ${activeTab === item.id ? 'ui-nav-active' : 'ui-nav-idle'}`}
-              >
-                <item.icon className="w-5 h-5 shrink-0" />
-                <span className="ml-2.5 hidden md:block text-sm">{item.label}</span>
-              </button>
-            ))}
-          </nav>
-
-          <div className="mt-auto px-2.5 pb-3 pt-2 border-t border-[var(--ui-line)] space-y-1.5">
-            <div className="px-1 pb-1 hidden md:block">
-              <p className="ui-side-label">工具</p>
-            </div>
-
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setShowDownloadMenu(!showDownloadMenu)}
-                disabled={(mode === 'novel' && Object.keys(chapters).length === 0) || (mode === 'shortStory' && !shortStoryInfo.content)}
-                className="ui-side-btn ui-side-btn-solid disabled:opacity-45 disabled:cursor-not-allowed"
-              >
-                <Download className="w-4 h-4 shrink-0" />
-                <span className="ml-2.5 hidden md:block">导出全书</span>
-              </button>
-              {showDownloadMenu && (
-                <div className="ui-menu bottom-full mb-2 left-0 right-0 md:left-0 md:right-auto md:w-full">
-                  <button type="button" onClick={() => { handleDownload('txt'); setShowDownloadMenu(false); }} className="ui-menu-item">导出为 TXT</button>
-                  <button type="button" onClick={() => { handleDownload('docx'); setShowDownloadMenu(false); }} className="ui-menu-item">导出为 Word</button>
-                </div>
-              )}
-            </div>
-
-            <button type="button" onClick={() => setActiveTab('examples')} className={`ui-side-btn ${activeTab === 'examples' ? 'ui-nav-active' : 'ui-side-btn-tool'}`}>
-              <FileText className="w-4 h-4 shrink-0" />
-              <span className="ml-2.5 hidden md:block text-sm">范文参考</span>
-            </button>
-
-            <a href="https://github.com/sqdft" target="_blank" rel="noopener noreferrer" className="ui-side-btn ui-side-btn-tool no-underline">
-              <Globe className="w-4 h-4 shrink-0" />
-              <span className="ml-2.5 hidden md:block text-sm">我的博客</span>
-            </a>
-
-            <button type="button" onClick={handleExportData} className="ui-side-btn ui-side-btn-tool">
-              <Download className="w-4 h-4 shrink-0" />
-              <span className="ml-2.5 hidden md:block text-sm">备份数据</span>
-            </button>
-
-            <button type="button" onClick={handleImportData} className="ui-side-btn ui-side-btn-tool">
-              <Upload className="w-4 h-4 shrink-0" />
-              <span className="ml-2.5 hidden md:block text-sm">恢复数据</span>
-            </button>
-
-            <button type="button" onClick={handleResetBookInfo} className="ui-side-btn ui-side-btn-warn">
-              <RefreshCw className="w-4 h-4 shrink-0" />
-              <span className="ml-2.5 hidden md:block text-sm">重开新书</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleReset}
-              className={`ui-side-btn ${showResetConfirm ? 'ui-side-btn-danger-active' : 'ui-side-btn-danger'}`}
-            >
-              <RefreshCw className={`w-4 h-4 shrink-0 ${showResetConfirm ? 'animate-spin' : ''}`} />
-              <span className="ml-2.5 hidden md:block text-sm">{showResetConfirm ? '再点确认重置' : '重置全部'}</span>
-            </button>
-          </div>
-        </div>
-      </aside>
+      <AppSidebar
+        mode={mode}
+        activeTab={activeTab}
+        navItems={navItems}
+        progress={
+          mode === 'novel'
+            ? {
+                doneSteps: novelProgress.doneSteps,
+                score: novelProgress.score,
+                nextHint: novelProgress.nextHint,
+                tocCount: novelProgress.tocCount,
+                written: novelProgress.written,
+                target: novelProgress.target,
+              }
+            : {
+                doneSteps: shortProgress.doneSteps,
+                score: shortProgress.score,
+                nextHint: shortProgress.nextHint,
+                segTotal: shortProgress.segTotal,
+                doneSegs: shortProgress.doneSegs,
+                words: shortProgress.words,
+                target: shortProgress.target,
+              }
+        }
+        chaptersCount={Object.keys(chapters).length}
+        shortHasContent={!!shortStoryInfo.content}
+        showDownloadMenu={showDownloadMenu}
+        showResetConfirm={showResetConfirm}
+        onModeNovel={() => {
+          setMode('novel');
+          setActiveTab('book');
+        }}
+        onModeShort={() => {
+          setMode('shortStory');
+          setActiveTab('book');
+        }}
+        onNav={(id) => setActiveTab(id as Tab)}
+        onToggleDownloadMenu={() => setShowDownloadMenu(!showDownloadMenu)}
+        onDownloadTxt={() => {
+          handleDownload('txt', { onlyWritten: true, withCover: true });
+          setShowDownloadMenu(false);
+        }}
+        onDownloadDocx={() => {
+          handleDownload('docx', { onlyWritten: true, withCover: true });
+          setShowDownloadMenu(false);
+        }}
+        onDownloadTxtVolumes={() => {
+          handleDownload('txt', { onlyWritten: true, withCover: true, volumeSize: 30 });
+          setShowDownloadMenu(false);
+        }}
+        onDownloadDocxVolumes={() => {
+          handleDownload('docx', { onlyWritten: true, withCover: true, volumeSize: 30 });
+          setShowDownloadMenu(false);
+        }}
+        onExportData={handleExportData}
+        onImportData={handleImportData}
+        onResetBook={handleResetBookInfo}
+        onResetAll={handleReset}
+      />
 
       <div className="ui-main-panel flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
-        <header className="ui-header">
-          <div className="min-w-0">
-            <h2 className="font-semibold text-[var(--ui-ink)] text-[15px] truncate">
-              {activeTab === 'settings' && '系统设置'}
-              {activeTab === 'book' && (mode === 'novel' ? '书籍信息' : '短篇设定')}
-              {activeTab === 'characters' && '人物关系'}
-              {activeTab === 'realms' && getRealmSystemLabel(bookInfo.themes).title}
-              {activeTab === 'toc' && '大纲目录'}
-              {activeTab === 'chapters' && (mode === 'novel' ? '章节正文' : '故事正文')}
-              {activeTab === 'examples' && '范文参考'}
-            </h2>
-            {taskState.status !== 'idle' && (
-              <p className={`text-[11px] mt-0.5 truncate ${taskState.status === 'error' ? 'text-red-600' : 'text-[var(--ui-muted)]'}`}>
-                {taskState.status === 'running' && (taskState.label || '任务进行中…')}
-                {taskState.status === 'error' && (taskState.lastError ? `失败：${taskState.lastError}` : '任务失败')}
-                {taskState.progress && taskState.status === 'running' && (
-                  <span className="tabular-nums"> · {taskState.progress.current}/{taskState.progress.total}</span>
-                )}
-              </p>
-            )}
-          </div>
-          <div className="flex-1 min-w-0" />
-          {/* 当前供应商卡片快捷切换 */}
-          {providerProfiles.length > 0 && (
-            <select
-              value={activeProfileId || ''}
-              onChange={(e) => {
-                const p = providerProfiles.find(x => x.id === e.target.value);
-                if (p) activateProviderProfile(p);
-              }}
-              className="hidden md:block text-xs ui-input !py-1 !px-2 max-w-[10rem] shrink-0"
-              title="切换供应商卡片"
-            >
-              <option value="" disabled>供应商卡片</option>
-              {providerProfiles.map(p => (
-                <option key={p.id} value={p.id}>{p.name}</option>
-              ))}
-            </select>
-          )}
-          {(bookInfo.title || shortStoryInfo.title) && (
-            <span className="hidden sm:inline text-sm text-[var(--ui-muted)] truncate max-w-[10rem]">
-              {mode === 'novel' ? bookInfo.title : shortStoryInfo.title}
-            </span>
-          )}
-          {mode === 'novel' && bookInfo.targetChapterCount > 0 && (
-            <span className="text-xs tabular-nums shrink-0 font-semibold text-[var(--ui-accent-text)] bg-[var(--ui-accent-soft)] px-2.5 py-1 rounded-full border border-[var(--ui-accent)]/15">
-              {Object.keys(chapters).length}/{bookInfo.targetChapterCount} 章
-            </span>
-          )}
-          {taskState.status === 'running' && (
-            <span className="ui-status-pill shrink-0">
-              <Loader2 className="w-3 h-3 animate-spin" />
-              {taskState.kind === 'batch' ? '批量中' : '生成中'}
-            </span>
-          )}
-          {taskState.status === 'running' && (taskState.cancellable || isBatchGenerating) && (
-            <button type="button" onClick={requestCancelTask} className="text-xs px-2 py-1 rounded-lg border border-amber-200 text-amber-800 bg-amber-50 shrink-0">
-              停止
-            </button>
-          )}
-          {taskState.status === 'error' && (
-            <button type="button" onClick={() => retryLastTask()} className="text-xs px-2 py-1 rounded-lg border border-red-200 text-red-700 bg-red-50 shrink-0">
-              重试
-            </button>
-          )}
-          {taskState.status === 'error' && (
-            <button type="button" onClick={clearTask} className="text-xs text-[var(--ui-muted)] shrink-0">
-              清除
-            </button>
-          )}
-          {isGenerating && taskState.status === 'idle' && (
-            <span className="ui-status-pill shrink-0">
-              <Loader2 className="w-3 h-3 animate-spin" />
-              生成中
-            </span>
-          )}
-        </header>
+        <AppHeader
+          activeTab={activeTab}
+          mode={mode}
+          realmTitle={getRealmSystemLabel(bookInfo.themes).title}
+          taskState={taskState}
+          isBatchGenerating={isBatchGenerating}
+          providerProfiles={providerProfiles}
+          activeProfileId={activeProfileId}
+          bookTitle={bookInfo.title}
+          shortTitle={shortStoryInfo.title}
+          chapterWritten={Object.keys(chapters).length}
+          chapterTarget={bookInfo.targetChapterCount || 0}
+          onActivateProfile={activateProviderProfile}
+          onCancelTask={requestCancelTask}
+          onRetryTask={() => {
+            void retryLastTask();
+          }}
+          onClearTask={clearTask}
+        />
 
         <main className={`flex-1 min-h-0 overflow-y-auto ${activeTab === 'chapters' ? 'p-0' : 'p-5 md:p-8'}`}>
+          {activeTab !== 'settings' && !settingsReady(settings).ok && (
+            <div className="mx-5 md:mx-8 mt-4 mb-0 rounded-xl border border-amber-200 bg-amber-50/90 px-3 py-2 text-sm text-amber-900 flex flex-wrap items-center justify-between gap-2">
+              <span>设置未就绪：{settingsReady(settings).reason || '请完善 API 配置'}（开始生成前请先配置）</span>
+              <button type="button" className="text-xs font-semibold text-[var(--ui-accent-text)]" onClick={() => setActiveTab('settings')}>
+                去设置
+              </button>
+            </div>
+          )}
           {activeTab === 'settings' && renderSettings()}
           {activeTab === 'book' && renderBookInfo()}
           {activeTab === 'characters' && renderCharacters()}
           {activeTab === 'realms' && renderRealms()}
           {activeTab === 'toc' && renderTOC()}
+          {activeTab === 'memory' && mode === 'novel' && (
+            <MemoryPanel novelMemory={novelMemory} setNovelMemory={setNovelMemory} editable={memoryEditable} setEditable={setMemoryEditable} />
+          )}
           {activeTab === 'chapters' && renderChapters()}
           {activeTab === 'examples' && renderExamples()}
         </main>
       </div>
 
-      <div className="fixed bottom-4 right-4 z-[80] flex flex-col gap-2 max-w-sm w-[min(100vw-2rem,22rem)] pointer-events-none">
-        {toasts.map(t => (
-          <div
-            key={t.id}
-            className={`pointer-events-auto ui-form-card !p-3 shadow-lg border ${
-              t.kind === 'error' ? 'border-red-200' :
-              t.kind === 'success' ? 'border-emerald-200' :
-              t.kind === 'warn' ? 'border-amber-200' : 'border-[var(--ui-line)]'
-            }`}
-          >
-            <div className="flex items-start gap-2">
-              <p className="text-sm text-[var(--ui-ink)] flex-1 leading-snug">{t.message}</p>
-              <button type="button" className="text-[var(--ui-muted)] text-xs shrink-0" onClick={() => dismissToast(t.id)}>关闭</button>
-            </div>
-            {t.actionTab && t.actionLabel && (
-              <button
-                type="button"
-                className="mt-2 text-xs font-semibold text-[var(--ui-accent-text)]"
-                onClick={() => { setActiveTab(t.actionTab!); dismissToast(t.id); }}
-              >
-                {t.actionLabel} →
-              </button>
-            )}
-          </div>
-        ))}
-      </div>
+      <DownstreamConfirmModal
+        state={downstreamConfirm}
+        onCancel={() => setDownstreamConfirm(null)}
+        onConfirm={resolveDownstreamConfirm}
+      />
+      <ToastStack
+        toasts={toasts}
+        onDismiss={dismissToast}
+        onAction={(tab, id) => {
+          setActiveTab(tab as Tab);
+          dismissToast(id);
+        }}
+      />
     </div>
   );
 }
