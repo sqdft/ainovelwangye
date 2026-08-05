@@ -1446,19 +1446,31 @@ export default function App() {
   const handleGenerateShortStoryOutline = async () => {
     if (!ensureSettingsReady()) return;
     if (!requireGate(!!shortStoryInfo.title, '请先填写或选择一个故事标题', 'book', '去填标题')) return;
+
+    const hasGeneratedContent = !!shortStoryInfo.content.trim() || shortStoryInfo.segments.some(segment => segment.isGenerated);
+    if (hasGeneratedContent && !window.confirm('重新生成故事大纲会覆盖当前分段规划并清空对应正文，以免旧内容与新大纲不一致。确定继续吗？')) return;
+
     await runTask({
       kind: 'shortOutline',
-      label: '生成短篇分段',
+      label: '生成短篇大纲与分段',
       run: async () => {
-      // 生成分段大纲
-      const segments = await generateShortStorySegments(shortStoryInfo, settings);
-      setShortStoryInfo({
-        ...shortStoryInfo,
-        segments,
-        isOutlineGenerated: true,
-      });
-      pushToast(`已生成 ${segments.length} 段结构，可在下方编辑摘要`, 'success', { label: '去写正文', tab: 'chapters' });
-          },
+        patchTaskProgress({ label: '正在整理故事总纲', progress: { current: 1, total: 2 } });
+        const outline = shortStoryInfo.outline.trim()
+          ? shortStoryInfo.outline.trim()
+          : await generateShortStoryOutlineFromTitle(shortStoryInfo.title, shortStoryInfo.themes, settings);
+        patchTaskProgress({ label: '正在拆分分段规划', progress: { current: 2, total: 2 } });
+        const infoForSegments = { ...shortStoryInfo, outline };
+        const segments = await generateShortStorySegments(infoForSegments, settings);
+        setShortStoryInfo(prev => ({
+          ...prev,
+          outline,
+          content: '',
+          segments,
+          currentSegment: 0,
+          isOutlineGenerated: true,
+        }));
+        pushToast(`已生成故事大纲和 ${segments.length} 段结构，可继续编辑后写正文`, 'success', { label: '去写正文', tab: 'chapters' });
+      },
     });
   };
 
@@ -1563,11 +1575,18 @@ export default function App() {
 
     const segments = shortStoryInfo.segments || [];
     let targetIndex = options?.segmentIndex;
-    if (targetIndex === undefined) {
+    if (options?.forceFinal && segments.length > 0) {
+      const incompleteBeforeFinal = segments.slice(0, -1).some(segment => !segment.isGenerated);
+      if (incompleteBeforeFinal) {
+        pushToast('请先按顺序完成最后一段之前的内容，再生成最终稿。', 'warn');
+        return;
+      }
+      targetIndex = segments.length - 1;
+    } else if (targetIndex === undefined) {
       targetIndex = segments.findIndex(s => !s.isGenerated);
       if (targetIndex < 0) targetIndex = Math.min(shortStoryInfo.currentSegment || 0, Math.max(segments.length - 1, 0));
     }
-    const rewrite = !!options?.rewrite;
+    const rewrite = !!options?.rewrite || !!(options?.forceFinal && segments[targetIndex ?? -1]?.isGenerated);
     const isLastSegment = segments.length === 0
       ? !!options?.forceFinal
       : targetIndex >= segments.length - 1;
@@ -1584,6 +1603,10 @@ export default function App() {
       cancellable: true,
       run: async () => {
 
+      patchTaskProgress({
+        label: segments.length > 0 ? `正在准备第 ${(targetIndex ?? 0) + 1}/${segments.length} 段` : '正在准备续写内容',
+        progress: segments.length > 0 ? { current: (targetIndex ?? 0) + 1, total: segments.length } : undefined,
+      });
       const MAX_CONTEXT_LENGTH = 1500;
       let context = shortStoryInfo.content || '';
       // 重写当前段：去掉该段及之后内容（按已生成段拼接）
@@ -1602,9 +1625,16 @@ export default function App() {
         ...shortStoryInfo,
         currentSegment: targetIndex || 0,
       };
+      patchTaskProgress({ label: isFinalBatch ? '正在生成并检查故事收尾' : '正在生成当前分段正文' });
       const newContent = await generateShortStoryContent(infoForGen, context, settings, isFinalBatch, targetIndex);
+      if (!newContent.trim() || newContent.trim().length < 50) {
+        throw new Error('AI 未生成足够的有效正文，请检查模型设置后重试。');
+      }
 
       const cleanedContent = removeDuplicateContent(context, newContent);
+      if (!cleanedContent.trim() || cleanedContent.trim().length < 50) {
+        throw new Error('本次生成内容疑似全部重复，未写入正文。建议重写当前段或调整分段摘要。');
+      }
       if (cleanedContent.trim().length < 50 && newContent.trim().length > 100) {
         pushToast('检测到生成内容与已有内容高度重复，已跳过重复部分。建议重写当前段，或调整分段摘要后再生成。', 'warn');
       }
@@ -1628,6 +1658,20 @@ export default function App() {
       const rebuiltContent = nextSegments.length > 0
         ? nextSegments.filter(s => s.isGenerated && s.content).map(s => s.content).join('\n\n')
         : (rewrite ? cleanedContent : (shortStoryInfo.content ? shortStoryInfo.content + '\n\n' + cleanedContent : cleanedContent));
+
+      if (isFinalBatch) {
+        const qualityWarnings: string[] = [];
+        const finalWordCount = countTextLength(rebuiltContent);
+        if (finalWordCount < shortStoryInfo.targetWordCount * 0.65) {
+          qualityWarnings.push(`\u603b\u5b57\u6570\u504f\u5c11\uff08${finalWordCount}/${shortStoryInfo.targetWordCount} \u5b57\uff09`);
+        }
+        if (/(\u672a\u5b8c\u5f85\u7eed|\u65b0\u7684\u5f81\u7a0b|\u771f\u6b63\u7684\u98ce\u66b4|\u98ce\u5377\u8d77\u7eb8\u9875|\u6545\u4e8b\u624d\u521a\u521a\u5f00\u59cb)$/.test(rebuiltContent.trim().slice(-120))) {
+          qualityWarnings.push('\u7ed3\u5c3e\u4ecd\u50cf\u60ac\u5ff5\u94a9\u5b50');
+        }
+        if (qualityWarnings.length > 0) {
+          pushToast(`\u6700\u7ec8\u7a3f\u8d28\u68c0\u63d0\u9192\uff1a${qualityWarnings.join('\uff1b')}`, 'warn');
+        }
+      }
 
       const nextIndex = nextSegments.length > 0
         ? Math.min((targetIndex || 0) + (rewrite ? 0 : 1), nextSegments.length)

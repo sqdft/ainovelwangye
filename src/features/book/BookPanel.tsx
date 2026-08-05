@@ -85,6 +85,27 @@ export function BookPanel(props: BookPanelProps) {
   } = props;
   const handleSelectBookTitle = handleSelectTitle;
 
+  const updateShortStorySetup = (patch: Partial<ShortStoryInfo>) => {
+    const hasDownstream = !!shortStoryInfo.content.trim() || shortStoryInfo.segments.length > 0 || shortStoryInfo.isOutlineGenerated;
+    const changed = Object.entries(patch).some(([key, value]) => shortStoryInfo[key as keyof ShortStoryInfo] !== value);
+    if (!changed) return;
+
+    if (hasDownstream && !window.confirm('修改标题、主题、目标字数或故事大纲会使现有分段正文失效。确定清空正文并重新规划吗？')) {
+      return;
+    }
+
+    setShortStoryInfo({
+      ...shortStoryInfo,
+      ...patch,
+      ...(hasDownstream ? {
+        content: '',
+        currentSegment: 0,
+        segments: shortStoryInfo.segments.map(segment => ({ ...segment, content: '', isGenerated: false })),
+        isOutlineGenerated: false,
+      } : {}),
+    });
+  };
+
 if (mode === 'shortStory') {
       return (
         <div className="max-w-3xl mx-auto space-y-6">
@@ -93,20 +114,20 @@ if (mode === 'shortStory') {
           </div>
 
           <div className="ui-card p-6 md:p-8 space-y-6">
-            <ThemeSelector onMaxReached={(msg) => pushToast?.(msg, 'warn')} 
+            <ThemeSelector onMaxReached={(msg) => pushToast?.(msg, 'warn')}
               type="shortStory"
-              selectedThemes={shortStoryInfo.themes} 
-              onChange={(themes) => setShortStoryInfo({...shortStoryInfo, themes})} 
+              selectedThemes={shortStoryInfo.themes}
+              onChange={(themes) => updateShortStorySetup({ themes })}
             />
-            
+
             <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1.4fr)_minmax(0,0.8fr)] gap-5 items-start">
               <div className="space-y-2 min-w-0">
                 <label className="block text-sm font-medium text-stone-700 leading-5 h-5">故事标题</label>
                 <div className="flex gap-2 items-center min-h-11">
-                  <input 
-                    type="text" 
+                  <input
+                    type="text"
                     value={shortStoryInfo.title}
-                    onChange={(e) => setShortStoryInfo({...shortStoryInfo, title: e.target.value})}
+                    onChange={(e) => updateShortStorySetup({ title: e.target.value })}
                     placeholder="请输入标题，或点右侧 AI 构思"
                     className="flex-1 min-w-0 ui-input h-11"
                   />
@@ -126,7 +147,7 @@ if (mode === 'shortStory') {
                       <button
                         key={idx}
                         type="button"
-                        onClick={() => setShortStoryInfo({...shortStoryInfo, title: t})}
+                        onClick={() => updateShortStorySetup({ title: t })}
                         className="px-2.5 py-1.5 text-xs bg-[var(--ui-accent-soft)] text-[var(--ui-accent-text)] rounded-lg border border-[var(--ui-line)] hover:brightness-95 transition-colors"
                       >
                         {t}
@@ -138,13 +159,12 @@ if (mode === 'shortStory') {
               <div className="space-y-2 min-w-0">
                 <label className="block text-sm font-medium text-stone-700 leading-5 h-5">目标总字数</label>
                 <div className="flex gap-2 items-center min-h-11">
-                  <input 
-                    type="number" 
+                  <input
+                    type="number"
                     value={shortStoryInfo.targetWordCount}
                     onChange={(e) => {
                       const n = parseInt(e.target.value, 10);
-                      setShortStoryInfo({
-                        ...shortStoryInfo,
+                      updateShortStorySetup({
                         targetWordCount: Number.isFinite(n) ? Math.min(30000, Math.max(1000, n)) : 10000
                       });
                     }}
@@ -170,9 +190,9 @@ if (mode === 'shortStory') {
                   AI 生成大纲
                 </button>
               </div>
-              <textarea 
+              <textarea
                 value={shortStoryInfo.outline}
-                onChange={(e) => setShortStoryInfo({...shortStoryInfo, outline: e.target.value})}
+                onChange={(e) => updateShortStorySetup({ outline: e.target.value })}
                 placeholder="描述这个短篇故事的核心创意、主要情节和结局。也可以先点右上角「AI 生成大纲」。"
                 rows={8}
                 className="w-full ui-input ui-textarea min-h-[11rem] resize-y"
@@ -205,16 +225,16 @@ if (mode === 'shortStory') {
         </div>
 
         <div className="ui-card p-6 md:p-8 space-y-6">
-          <ThemeSelector 
-            selectedThemes={bookInfo.themes} 
+          <ThemeSelector
+            selectedThemes={bookInfo.themes}
             onChange={handleBookThemesChange}
           />
-          
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
             <div className="space-y-2 min-w-0">
               <label className="block text-sm font-medium text-stone-700 leading-5 h-5">小说篇幅</label>
               <div className="flex gap-2 items-center min-h-11">
-                <select 
+                <select
                   value={bookInfo.lengthType}
                   onChange={(e) => handleLengthChange(e.target.value)}
                   className="flex-1 min-w-0 ui-input h-11"
@@ -242,8 +262,8 @@ if (mode === 'shortStory') {
             <div className="space-y-2 min-w-0">
               <label className="block text-sm font-medium text-stone-700 leading-5 h-5">书名</label>
               <div className="flex gap-2 items-center min-h-11">
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   value={bookInfo.title}
                   onChange={(e) => handleBookTitleInput(e.target.value)}
                   placeholder="请先生成书名或手动输入"
@@ -261,7 +281,7 @@ if (mode === 'shortStory') {
               </div>
             </div>
           </div>
-          
+
           {/* 书名卡片选择区域 - 选择后自动消失 */}
           {bookInfo.titleOptions && bookInfo.titleOptions.length > 0 && (
             <div className="border-t border-[var(--ui-line)] pt-6 -mx-8 px-8">
@@ -296,7 +316,7 @@ if (mode === 'shortStory') {
               </div>
             </div>
           )}
-          
+
           {/* 已选择书名提示 */}
           {bookInfo.isTitleSelected && bookInfo.title && (
             <div className="border-t border-stone-100 pt-6">
@@ -304,7 +324,7 @@ if (mode === 'shortStory') {
                 <span className="w-2 h-2 bg-[var(--ui-success)] rounded-full"></span>
                 已选择书名：《{bookInfo.title}》
               </p>
-              
+
               {/* 境界 / 世界规则开关 */}
               <div className="ui-realm-note flex items-center justify-between p-4">
                 <div className="flex-1">
@@ -333,12 +353,12 @@ if (mode === 'shortStory') {
               </div>
             </div>
           )}
-          
+
           {/* 大纲和世界观 - 始终显示 */}
           <div className="space-y-6">
             <div>
               <label className="block text-sm font-medium text-stone-700 mb-2">故事大纲</label>
-              <textarea 
+              <textarea
                 value={bookInfo.outline}
                 onChange={(e) => handleBookPlanningFieldChange('outline', e.target.value)}
                 placeholder={bookInfo.isTitleSelected ? "点击右上角按钮生成，或手动填写..." : "请先选择书名后再填写大纲"}
@@ -348,7 +368,7 @@ if (mode === 'shortStory') {
             </div>
             <div>
               <label className="block text-sm font-medium text-stone-700 mb-2">世界观设定</label>
-              <textarea 
+              <textarea
                 value={bookInfo.worldbuilding}
                 onChange={(e) => handleBookPlanningFieldChange('worldbuilding', e.target.value)}
                 placeholder={bookInfo.isTitleSelected ? "点击右上角按钮生成，或手动填写..." : "请先选择书名后再填写世界观"}
@@ -357,7 +377,7 @@ if (mode === 'shortStory') {
               />
             </div>
           </div>
-          
+
           {/* 引导提示 */}
           {!bookInfo.isTitleSelected && (
             <div className="ui-seed-tip p-4">
@@ -369,5 +389,5 @@ if (mode === 'shortStory') {
         </div>
       </div>
     );
-  
+
 }

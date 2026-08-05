@@ -236,11 +236,11 @@ function validateRealms(data: any): Realm[] {
   return realms;
 }
 
-function validateSegments(data: any): StorySegment[] {
+function validateSegments(data: any, targetWordCount = 10000): StorySegment[] {
   const rawSegments = Array.isArray(data) ? data : data?.segments;
   const segments = ensureArray<any>(rawSegments, 'segments')
     .map((seg, index) => ({
-      segmentNumber: Number(seg?.segmentNumber) || index + 1,
+      segmentNumber: index + 1,
       title: cleanText(seg?.title),
       wordCount: Number(seg?.wordCount) || 0,
       summary: cleanText(seg?.summary),
@@ -252,10 +252,38 @@ function validateSegments(data: any): StorySegment[] {
   if (segments.length === 0) {
     throw new Error('AI 返回的分段大纲为空或字段不完整，请重试。');
   }
-  return segments;
+
+  // 将模型随手填写的字数归一化到目标总字数，避免后续每段目标失真、最后一段异常过长或过短。
+  const requestedTarget = Math.max(Number(targetWordCount) || 10000, segments.length * 200);
+  const minimum = Math.min(300, Math.max(180, Math.floor(requestedTarget / segments.length)));
+  const weights = segments.map(segment => Math.max(1, segment.wordCount));
+  const weightTotal = weights.reduce((sum, weight) => sum + weight, 0);
+  const counts = weights.map(weight => Math.max(minimum, Math.round(requestedTarget * weight / weightTotal)));
+  let difference = requestedTarget - counts.reduce((sum, count) => sum + count, 0);
+
+  // 把四舍五入产生的误差集中修正到字数最多的分段，保证总量稳定。
+  const order = counts.map((_, index) => index).sort((a, b) => counts[b] - counts[a]);
+  let cursor = 0;
+  while (difference !== 0 && order.length > 0) {
+    const index = order[cursor % order.length];
+    if (difference > 0) {
+      counts[index] += 1;
+      difference -= 1;
+    } else if (counts[index] > minimum) {
+      counts[index] -= 1;
+      difference += 1;
+    }
+    cursor += 1;
+    if (cursor > requestedTarget * 2) break;
+  }
+
+  return segments.map((segment, index) => ({
+    ...segment,
+    wordCount: counts[index],
+  }));
 }
 
-// 使用单个密钥调用 OpenAI 兼容 API
+// ???????? OpenAI ?? API
 async function callOpenAIWithKey(
   prompt: string, 
   settings: Settings, 
@@ -1081,7 +1109,7 @@ ${themePrompts}
 
   const response = await callAI(prompt, settings, true);
   const segments = extractJSON(response);
-  return validateSegments(segments);
+  return validateSegments(segments, info.targetWordCount);
 }
 
 // 生成指定分段内容
@@ -1099,7 +1127,7 @@ export async function generateShortStoryContent(
   const currentSeg = segments[currentBatch];
   const segmentsInfo = segments.map((s, i) => 
     `第${i+1}段：${s.title}（约${s.wordCount}字）- ${s.summary}${s.isGenerated ? ' [已生成]' : ''}${i === currentBatch ? ' 【当前要写】' : ''}`
-  ).join('\n') || '';
+  ).join('\n') || '当前没有分段规划，将按连续写作模式推进。';
   
   // 按分段字数；无分段时回退两批
   const targetTotal = info.targetWordCount || 10000;
@@ -1108,10 +1136,10 @@ export async function generateShortStoryContent(
     : Math.round(targetTotal / Math.max(totalSegments, 2));
   
   const endingInstruction = isFinalBatch 
-    ? `【最后一段/收尾：目标约${batchWordCount}字】必须写到真正大结局！所有线索收束，主角目标达成或失败，用具体动作/对话收尾，禁止悬念钩子！` 
+    ? `【最后一段/收尾：目标约${batchWordCount}字】必须写到真正大结局！所有线索收束，主角目标达成或失败，用具体动作/对话收尾，禁止悬念钩子！`
     : (currentSeg
       ? `【当前段：${currentSeg.title} · 目标约${batchWordCount}字】只写本段内容：${currentSeg.summary}。充分展开细节，在本段结束处自然停下，不要提前写后续段。`
-      : `【本批：目标约${batchWordCount}字】推进剧情，充分展开细节，在合适的剧情节点暂停，不用收尾。`);
+      : `【连续写作：目标约${batchWordCount}字】当前没有分段规划，这是同一篇正文的续写批次。承接前文推进新的剧情，充分展开细节，在合适的剧情节点暂停，不要重复前文，也不要提前收尾。`);
 
   const themePrompts = info.themes.map(theme => getThemePrompt(theme, 'shortStory')).join('\n');
   let prompt = `你是一位专业短篇小说作家。撰写短篇故事。

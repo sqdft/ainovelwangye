@@ -8,8 +8,11 @@ import {
   FileText,
   List,
   Loader2,
+  Pencil,
   Play,
   RefreshCw,
+  Save,
+  X,
   Wand2,
 } from 'lucide-react';
 import type { ShortStoryInfo, TOCItem } from '../../types';
@@ -92,6 +95,54 @@ export function ChaptersPanel(props: ChaptersPanelProps) {
 
   const [rewriteDirective, setRewriteDirective] = useState('');
   const [shortCopied, setShortCopied] = useState(false);
+  const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null);
+  const [segmentDraft, setSegmentDraft] = useState({ title: '', summary: '' });
+
+  const beginEditSegment = (index: number) => {
+    const segment = shortStoryInfo.segments?.[index];
+    if (!segment) return;
+    setEditingSegmentIndex(index);
+    setSegmentDraft({ title: segment.title, summary: segment.summary });
+  };
+
+  const cancelEditSegment = () => {
+    setEditingSegmentIndex(null);
+    setSegmentDraft({ title: '', summary: '' });
+  };
+
+  const saveSegmentDraft = () => {
+    if (editingSegmentIndex == null) return;
+    const index = editingSegmentIndex;
+    const title = segmentDraft.title.trim();
+    const summary = segmentDraft.summary.trim();
+    const current = shortStoryInfo.segments?.[index];
+    if (!current || !title || !summary) return;
+
+    const changed = title !== current.title || summary !== current.summary;
+    const invalidatesGeneratedContent = changed && (shortStoryInfo.segments || [])
+      .some((segment, segmentIndex) => segmentIndex >= index && segment.isGenerated);
+    if (invalidatesGeneratedContent && !window.confirm('修改已生成分段的规划后，该段及后续正文需要重新生成。确定保存吗？')) return;
+
+    setShortStoryInfo(prev => {
+      const nextSegments = (prev.segments || []).map((segment, segmentIndex) => {
+        if (segmentIndex < index || !invalidatesGeneratedContent) return segment;
+        if (segmentIndex === index) return { ...segment, title, summary, content: '', isGenerated: false };
+        return { ...segment, content: '', isGenerated: false };
+      });
+      const nextContent = invalidatesGeneratedContent
+        ? nextSegments.filter(segment => segment.isGenerated && segment.content).map(segment => segment.content).join('\n\n')
+        : prev.content;
+      return {
+        ...prev,
+        content: nextContent,
+        segments: nextSegments.map((segment, segmentIndex) =>
+          segmentIndex === index && !invalidatesGeneratedContent ? { ...segment, title, summary } : segment
+        ),
+        currentSegment: invalidatesGeneratedContent ? index : prev.currentSegment,
+      };
+    });
+    cancelEditSegment();
+  };
 
   const copyShortStoryContent = async () => {
     const content = shortStoryInfo.content || '';
@@ -210,7 +261,7 @@ export function ChaptersPanel(props: ChaptersPanelProps) {
             <button
               type="button"
               onClick={() => onGenerateShort({})}
-              disabled={isTaskBusy || (!shortStoryInfo.outline && !totalSegments)}
+              disabled={isTaskBusy || (!shortStoryInfo.outline && !totalSegments) || (totalSegments > 0 && generatedSegments >= totalSegments)}
               className="ui-btn-primary disabled:opacity-70"
             >
               {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
@@ -224,8 +275,9 @@ export function ChaptersPanel(props: ChaptersPanelProps) {
               <button
                 type="button"
                 onClick={() => onGenerateShort({ forceFinal: true })}
-                disabled={isTaskBusy}
+                disabled={isTaskBusy || (totalSegments > 1 && generatedSegments < totalSegments - 1)}
                 className="ui-btn-secondary disabled:opacity-70"
+                title={totalSegments > 1 && generatedSegments < totalSegments - 1 ? '请先完成前面分段' : '重新生成最后一段并检查收尾'}
               >
                 {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Feather className="w-4 h-4" />}
                 生成最终稿
@@ -271,20 +323,60 @@ export function ChaptersPanel(props: ChaptersPanelProps) {
                 <article key={seg.segmentNumber} className="ui-short-story-segment-card">
                   <div className="ui-short-story-segment-topline">
                     <span className="ui-short-story-segment-number">{seg.segmentNumber}</span>
-                    <span className={`ui-short-story-segment-status ${seg.isGenerated ? 'is-done' : ''}`}>
-                      {seg.isGenerated ? '已写' : '未写'}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className={`ui-short-story-segment-status ${seg.isGenerated ? 'is-done' : ''}`}>
+                        {seg.isGenerated ? '已写' : '未写'}
+                      </span>
+                      {editingSegmentIndex !== idx && (
+                        <button
+                          type="button"
+                          onClick={() => beginEditSegment(idx)}
+                          className="ui-short-story-segment-edit-button"
+                          title="编辑分段规划"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  <h5>{seg.title}</h5>
-                  <p>{seg.summary || '暂无分段说明'}</p>
-                  <button
-                    type="button"
-                    disabled={isTaskBusy}
-                    onClick={() => onGenerateShort({ segmentIndex: idx, rewrite: seg.isGenerated })}
-                    className="ui-short-story-segment-action disabled:opacity-50"
-                  >
-                    {seg.isGenerated ? '重写本段' : '生成本段'}
-                  </button>
+                  {editingSegmentIndex === idx ? (
+                    <div className="ui-short-story-segment-edit">
+                      <input
+                        value={segmentDraft.title}
+                        onChange={(event) => setSegmentDraft(prev => ({ ...prev, title: event.target.value }))}
+                        className="ui-input"
+                        placeholder='"分段标题"'
+                      />
+                      <textarea
+                        value={segmentDraft.summary}
+                        onChange={(event) => setSegmentDraft(prev => ({ ...prev, summary: event.target.value }))}
+                        className="ui-input"
+                        rows={3}
+                        placeholder='"这一段要发生什么？"'
+                      />
+                      <div className="ui-short-story-segment-edit-actions">
+                        <button type="button" onClick={saveSegmentDraft} className="ui-short-story-segment-save">
+                          <Save className="w-3.5 h-3.5" /> 保存规划
+                        </button>
+                        <button type="button" onClick={cancelEditSegment} className="ui-short-story-segment-cancel">
+                          <X className="w-3.5 h-3.5" /> 取消
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <h5>{seg.title}</h5>
+                      <p>{seg.summary || '暂无分段说明'}</p>
+                      <button
+                        type="button"
+                        disabled={isTaskBusy}
+                        onClick={() => onGenerateShort({ segmentIndex: idx, rewrite: seg.isGenerated })}
+                        className="ui-short-story-segment-action disabled:opacity-50"
+                      >
+                        {seg.isGenerated ? '重写本段' : '生成本段'}
+                      </button>
+                    </>
+                  )}
                 </article>
               ))}
             </div>
