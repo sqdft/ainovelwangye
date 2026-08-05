@@ -140,7 +140,57 @@ function findSimilarSummaries(
   return warnings;
 }
 
-function useDualStorage<T>(key: string, initialValue: T): [T, (value: T | ((val: T) => T)) => void] {
+
+function normalizeModelList(models: ModelInfo[] | undefined, provider: Provider): ModelInfo[] {
+  const seen = new Set<string>();
+  return (Array.isArray(models) ? models : [])
+    .filter(model => typeof model?.id === 'string' && model.id.trim())
+    .map(model => ({
+      id: model.id.trim(),
+      name: model.name?.trim() || model.id.trim(),
+      provider,
+      contextLength: model.contextLength,
+    }))
+    .filter(model => {
+      if (seen.has(model.id)) return false;
+      seen.add(model.id);
+      return true;
+    });
+}
+
+function getSettingsApiKey(snapshot: Settings): string {
+  if (snapshot.provider === 'free') {
+    const keys = Array.isArray(snapshot.apiKeys) ? snapshot.apiKeys : [];
+    return (keys[snapshot.currentKeyIndex || 0] || keys[0] || '').trim();
+  }
+  return (snapshot.apiKey || '').trim();
+}
+
+function getProfileApiKey(profile: ProviderProfile): string {
+  if (profile.provider === 'free') {
+    const keys = Array.isArray(profile.apiKeys) ? profile.apiKeys : [];
+    return (keys[profile.currentKeyIndex || 0] || keys[0] || '').trim();
+  }
+  return (profile.apiKey || '').trim();
+}
+
+function sameProviderConnection(profile: ProviderProfile, snapshot: Settings): boolean {
+  return profile.provider === snapshot.provider &&
+    normalizeBaseUrl(profile.baseUrl || '') === normalizeBaseUrl(snapshot.baseUrl || '') &&
+    getProfileApiKey(profile) === getSettingsApiKey(snapshot);
+}
+
+function chooseAvailableModel(
+  currentModel: string | undefined,
+  models: ModelInfo[],
+  fallbackModel = '',
+): string {
+  const current = currentModel?.trim() || '';
+  if (current && models.some(model => model.id === current)) return current;
+  return models[0]?.id || current || fallbackModel;
+}
+
+function useDualStorage<T>(key: string, initialValue: T): [T, (value: T | ((val: T) => T)) => void, boolean] {
   const [storedValue, setStoredValue] = useState<T>(initialValue);
   const [loaded, setLoaded] = useState(false);
   const storedValueRef = useRef(storedValue);
@@ -163,7 +213,7 @@ function useDualStorage<T>(key: string, initialValue: T): [T, (value: T | ((val:
   };
 
   // 未加载完时返回初始值
-  return [loaded ? storedValue : initialValue, setValue];
+  return [loaded ? storedValue : initialValue, setValue, loaded];
 }
 
 
@@ -178,9 +228,17 @@ export default function App() {
   const [downstreamConfirm, setDownstreamConfirm] = useState<DownstreamConfirmState>(null);
   const [memoryEditable, setMemoryEditable] = useState(false);
   const toastIdRef = useRef(0);
-  const [providerProfiles, setProviderProfiles] = useDualStorage<ProviderProfile[]>('ai_novel_provider_profiles', []);
-  const [activeProfileId, setActiveProfileId] = useDualStorage<string | null>('ai_novel_active_profile_id', null);
+  const [providerProfiles, setProviderProfiles, providerProfilesLoaded] = useDualStorage<ProviderProfile[]>('ai_novel_provider_profiles', []);
+  const [activeProfileId, setActiveProfileId, activeProfileIdLoaded] = useDualStorage<string | null>('ai_novel_active_profile_id', null);
   const [profileNameDraft, setProfileNameDraft] = useState('');
+  const settingsRef = useRef<Settings | null>(null);
+  const providerProfilesRef = useRef<ProviderProfile[]>([]);
+  const activeProfileIdRef = useRef<string | null>(null);
+  const profileNameDraftRef = useRef('');
+  const modelDetectionRequestRef = useRef(0);
+  providerProfilesRef.current = providerProfiles;
+  activeProfileIdRef.current = activeProfileId;
+  profileNameDraftRef.current = profileNameDraft;
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
 
   const [tocCompact, setTocCompact] = useState(true);
@@ -241,73 +299,95 @@ export default function App() {
   };
 
 
-  const settingsFromProfile = (p: ProviderProfile): Settings => ({
-    ...settings,
-    provider: p.provider,
-    apiKey: p.apiKey,
-    apiKeys: p.apiKeys || [],
-    currentKeyIndex: p.currentKeyIndex || 0,
-    baseUrl: p.baseUrl,
-    model: p.model,
-    availableModels: p.availableModels || [],
-  });
+  const settingsFromProfile = (p: ProviderProfile): Settings => {
+    const baseSettings = settingsRef.current ?? settings;
+    const providerConfig = PROVIDERS[p.provider];
+    const availableModels = normalizeModelList(p.availableModels, p.provider);
+    return {
+      ...baseSettings,
+      provider: p.provider,
+      apiKey: p.apiKey || '',
+      apiKeys: Array.isArray(p.apiKeys) ? p.apiKeys : [],
+      currentKeyIndex: Number.isInteger(p.currentKeyIndex) ? p.currentKeyIndex : 0,
+      baseUrl: (p.baseUrl || '').trim() || providerConfig?.baseUrl || '',
+      model: chooseAvailableModel(p.model, availableModels, providerConfig?.model || ''),
+      availableModels,
+    };
+  };
 
-  const profileFromSettings = (name: string, id?: string): ProviderProfile => ({
-    id: id || `prof_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    name: name.trim() || `${PROVIDERS[settings.provider]?.label || settings.provider} · ${settings.model || '默认模型'}`,
-    provider: settings.provider,
-    apiKey: settings.apiKey || '',
-    apiKeys: settings.apiKeys || [],
-    currentKeyIndex: settings.currentKeyIndex || 0,
-    baseUrl: settings.baseUrl || '',
-    model: settings.model || '',
-    availableModels: settings.availableModels || [],
-    updatedAt: Date.now(),
-  });
+  const profileFromSettings = (snapshot: Settings, name: string, id?: string): ProviderProfile => {
+    const availableModels = normalizeModelList(snapshot.availableModels, snapshot.provider);
+    const providerConfig = PROVIDERS[snapshot.provider];
+    const model = chooseAvailableModel(snapshot.model, availableModels, providerConfig?.model || '');
+    return {
+      id: id || `prof_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      name: name.trim() || `${providerConfig?.label || snapshot.provider} · ${model || '未选模型'}`,
+      provider: snapshot.provider,
+      apiKey: snapshot.apiKey || '',
+      apiKeys: Array.isArray(snapshot.apiKeys) ? snapshot.apiKeys : [],
+      currentKeyIndex: Number.isInteger(snapshot.currentKeyIndex) ? snapshot.currentKeyIndex : 0,
+      baseUrl: (snapshot.baseUrl || '').trim() || providerConfig?.baseUrl || '',
+      model,
+      availableModels,
+      updatedAt: Date.now(),
+    };
+  };
 
   const activateProviderProfile = (p: ProviderProfile) => {
+    const nextSettings = settingsFromProfile(p);
+    activeProfileIdRef.current = p.id;
     setActiveProfileId(p.id);
     setEditingProfileId(p.id);
     setProfileNameDraft(p.name);
-    setSettings(settingsFromProfile(p));
-    pushToast(`已切换：${p.name}`, 'success');
+    setSettings(nextSettings);
+    pushToast(`已切换到「${p.name}」`, 'success');
   };
 
   const saveProviderProfile = (asNew = false) => {
-    const name = profileNameDraft.trim() || `${PROVIDERS[settings.provider]?.label || '供应商'} · ${settings.model || '模型'}`;
-    if (!asNew && activeProfileId) {
-      const exists = providerProfiles.some(p => p.id === activeProfileId);
-      if (exists) {
-        setProviderProfiles(providerProfiles.map(p =>
-          p.id === activeProfileId ? profileFromSettings(name, activeProfileId) : p
-        ));
-      } else {
-        const created = profileFromSettings(name);
-        setProviderProfiles([...providerProfiles, created]);
-        setActiveProfileId(created.id);
-        setEditingProfileId(created.id);
-      }
-      setProfileNameDraft(name);
-      pushToast('供应商卡片已更新', 'success');
-      return;
-    }
-    const created = profileFromSettings(name);
-    setProviderProfiles([...providerProfiles, created]);
-    setActiveProfileId(created.id);
-    setEditingProfileId(created.id);
-    setProfileNameDraft(created.name);
-    pushToast('已保存新供应商卡片', 'success');
+    const snapshot = settingsRef.current ?? settings;
+    const availableModels = normalizeModelList(snapshot.availableModels, snapshot.provider);
+    const normalizedSettings: Settings = {
+      ...snapshot,
+      availableModels,
+      model: chooseAvailableModel(snapshot.model, availableModels, PROVIDERS[snapshot.provider]?.model || ''),
+    };
+    const currentId = activeProfileIdRef.current;
+    const targetId = !asNew && currentId && providerProfilesRef.current.some(p => p.id === currentId)
+      ? currentId
+      : undefined;
+    const name = profileNameDraftRef.current.trim() || `${PROVIDERS[normalizedSettings.provider]?.label || '自定义供应商'} · ${normalizedSettings.model || '未选模型'}`;
+    const saved = profileFromSettings(normalizedSettings, name, targetId);
+
+    settingsRef.current = normalizedSettings;
+    setSettings(normalizedSettings);
+    setProviderProfiles(prev => {
+      const exists = prev.some(p => p.id === saved.id);
+      return exists ? prev.map(p => p.id === saved.id ? saved : p) : [...prev, saved];
+    });
+    providerProfilesRef.current = providerProfilesRef.current.some(p => p.id === saved.id)
+      ? providerProfilesRef.current.map(p => p.id === saved.id ? saved : p)
+      : [...providerProfilesRef.current, saved];
+    activeProfileIdRef.current = saved.id;
+    setActiveProfileId(saved.id);
+    setEditingProfileId(saved.id);
+    setProfileNameDraft(saved.name);
+    pushToast(targetId ? '已更新当前卡片' : '已保存为新卡片', 'success');
   };
 
   const deleteProviderProfile = (id: string) => {
-    const next = providerProfiles.filter(p => p.id !== id);
+    const next = providerProfilesRef.current.filter(p => p.id !== id);
+    providerProfilesRef.current = next;
     setProviderProfiles(next);
-    if (activeProfileId === id) {
-      setActiveProfileId(next[0]?.id || null);
-      if (next[0]) {
-        setSettings(settingsFromProfile(next[0]));
-        setProfileNameDraft(next[0].name);
-        setEditingProfileId(next[0].id);
+    if (activeProfileIdRef.current === id) {
+      const nextProfile = next[0];
+      activeProfileIdRef.current = nextProfile?.id || null;
+      setActiveProfileId(nextProfile?.id || null);
+      if (nextProfile) {
+        const nextSettings = settingsFromProfile(nextProfile);
+        settingsRef.current = nextSettings;
+        setSettings(nextSettings);
+        setProfileNameDraft(nextProfile.name);
+        setEditingProfileId(nextProfile.id);
       } else {
         setEditingProfileId(null);
         setProfileNameDraft('');
@@ -316,15 +396,15 @@ export default function App() {
     pushToast('已删除卡片', 'info');
   };
 
-  /** 添加新供应商：不清空已保存卡片，只进入「空白草稿」编辑态 */
+  /** 开始编辑一套新的供应商配置，不影响已有卡片 */
   const beginNewProviderProfile = () => {
+    activeProfileIdRef.current = null;
     setActiveProfileId(null);
     setEditingProfileId(null);
     setProfileNameDraft('');
-    // 表单给干净默认值，不覆盖已保存的其它卡片
     const custom = PROVIDERS['custom'] || PROVIDERS['openai'] || Object.values(PROVIDERS)[0];
-    setSettings(prev => ({
-      ...prev,
+    const nextSettings: Settings = {
+      ...(settingsRef.current ?? settings),
       provider: 'custom',
       apiKey: '',
       apiKeys: [],
@@ -332,13 +412,11 @@ export default function App() {
       baseUrl: custom?.baseUrl || 'https://api.openai.com/v1',
       model: custom?.model || '',
       availableModels: [],
-      // 保留 minWordCount / temperature 等写作偏好
-      minWordCount: prev.minWordCount,
-      temperature: prev.temperature,
-    }));
-    pushToast('已进入新建供应商：填好后点「保存为新卡片」', 'info');
+    };
+    settingsRef.current = nextSettings;
+    setSettings(nextSettings);
+    pushToast('已进入新供应商配置', 'info');
   };
-
 
   const requireGate = (
     ok: boolean,
@@ -353,7 +431,7 @@ export default function App() {
   };
 
   // Settings State
-  const [settings, setSettings] = useDualStorage<Settings>('ai_novel_settings', {
+  const [settings, setSettings, settingsLoaded] = useDualStorage<Settings>('ai_novel_settings', {
     provider: 'gemini',
     apiKey: '',
     apiKeys: [], // 多密钥轮询列表
@@ -364,6 +442,7 @@ export default function App() {
     minWordCount: 2000,
     temperature: 0.9, // 默认 0.9，较高的创作自由度
   });
+  settingsRef.current = settings;
 
   // 确保旧数据也有所有必需字段
   useEffect(() => {
@@ -382,6 +461,43 @@ export default function App() {
       });
     }
   }, []);
+
+  // 当前卡片的配置变化后自动同步回供应商卡片
+  useEffect(() => {
+    if (!settingsLoaded || !providerProfilesLoaded || !activeProfileIdLoaded || !activeProfileId) return;
+    const currentProfile = providerProfilesRef.current.find(profile => profile.id === activeProfileId);
+    if (!currentProfile) return;
+
+    const nextProfile = profileFromSettings(settings, currentProfile.name, currentProfile.id);
+    const unchanged =
+      currentProfile.provider === nextProfile.provider &&
+      currentProfile.baseUrl === nextProfile.baseUrl &&
+      currentProfile.apiKey === nextProfile.apiKey &&
+      JSON.stringify(currentProfile.apiKeys || []) === JSON.stringify(nextProfile.apiKeys || []) &&
+      currentProfile.currentKeyIndex === nextProfile.currentKeyIndex &&
+      currentProfile.model === nextProfile.model &&
+      JSON.stringify(currentProfile.availableModels || []) === JSON.stringify(nextProfile.availableModels || []);
+    if (unchanged) return;
+
+    providerProfilesRef.current = providerProfilesRef.current.map(profile =>
+      profile.id === nextProfile.id ? nextProfile : profile
+    );
+    setProviderProfiles(prev => prev.map(profile =>
+      profile.id === nextProfile.id ? nextProfile : profile
+    ));
+  }, [
+    settingsLoaded,
+    providerProfilesLoaded,
+    activeProfileIdLoaded,
+    activeProfileId,
+    settings.provider,
+    settings.apiKey,
+    settings.apiKeys,
+    settings.currentKeyIndex,
+    settings.baseUrl,
+    settings.model,
+    settings.availableModels,
+  ]);
 
   // Novel State
   const [bookInfo, setBookInfo] = useDualStorage<BookInfo>('ai_novel_bookInfo', {
@@ -489,90 +605,157 @@ export default function App() {
       return;
     }
 
-    const newSettings: Partial<Settings> = {
+    // 切换到已有供应商时，优先恢复最近更新的配置卡片
+    const existingProfile = providerProfilesRef.current
+      .filter(profile => profile.provider === provider)
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0];
+    if (existingProfile) {
+      activateProviderProfile(existingProfile);
+      return;
+    }
+
+    const previous = settingsRef.current ?? settings;
+    const nextSettings: Settings = {
+      ...previous,
       provider,
+      apiKey: '',
+      apiKeys: [],
+      currentKeyIndex: 0,
       baseUrl: providerConfig.baseUrl,
       model: providerConfig.model,
+      availableModels: [],
     };
 
-    // 切换到免费提供商时，将单密钥复制到多密钥列表（如果多密钥为空）
-    if (provider === 'free' && (!settings.apiKeys || settings.apiKeys.length === 0) && settings.apiKey) {
-      newSettings.apiKeys = [settings.apiKey];
-    }
-
-    // 从免费提供商切换回其他时，将第一个多密钥复制到单密钥
-    if (provider !== 'free' && settings.provider === 'free' && settings.apiKeys && settings.apiKeys.length > 0) {
-      newSettings.apiKey = settings.apiKeys[0];
-    }
-
-    setSettings({ ...settings, ...newSettings });
+    // 没有对应卡片时，先进入新建草稿状态
+    activeProfileIdRef.current = null;
+    setActiveProfileId(null);
+    setEditingProfileId(null);
+    setProfileNameDraft('');
+    settingsRef.current = nextSettings;
+    setSettings(nextSettings);
   };
 
   const handleDetectModels = async () => {
-    if (settings.provider === 'gemini') {
-      pushToast('Gemini 不支持模型检测，请手动输入模型名称', 'info');
+    const snapshot = settingsRef.current ?? settings;
+    if (snapshot.provider === 'gemini') {
+      pushToast('Gemini 使用内置模型，无需检测', 'info');
       return;
     }
 
-    if (!settings.baseUrl) {
-      pushToast('请先设置 Base URL', 'warn');
+    if (!snapshot.baseUrl) {
+      pushToast('请填写 Base URL', 'warn');
       return;
     }
 
-    const apiKey = settings.provider === 'free' && settings.apiKeys && settings.apiKeys.length > 0
-      ? settings.apiKeys[settings.currentKeyIndex || 0] || settings.apiKeys[0]
-      : settings.apiKey;
-
-    if (!apiKey && settings.provider !== 'kilo') {
-      pushToast('请先设置 API Key', 'warn');
+    const apiKey = getSettingsApiKey(snapshot);
+    if (!apiKey && snapshot.provider !== 'kilo') {
+      pushToast('请填写 API Key', 'warn');
       return;
     }
 
+    const requestId = ++modelDetectionRequestRef.current;
+    const profileIdAtRequest = activeProfileIdRef.current;
     await runTask({
       kind: 'models',
       label: '检测可用模型',
       cancellable: false,
       run: async () => {
-        const headers: Record<string, string> = {
-          'Content-Type': 'application/json'
-        };
-        if (apiKey) {
-          headers['Authorization'] = `Bearer ${apiKey}`;
-        }
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 
-        const modelsUrl = `${normalizeBaseUrl(settings.baseUrl)}/models`;
-        const res = await proxyFetch(modelsUrl, {
-          method: 'GET',
-          headers
-        });
-
-        if (!res.ok) {
-          throw new Error(`API 请求失败 (${res.status})`);
-        }
+        const modelsUrl = `${normalizeBaseUrl(snapshot.baseUrl)}/models`;
+        const res = await proxyFetch(modelsUrl, { method: 'GET', headers });
+        if (!res.ok) throw new Error(`API 请求失败 (${res.status})`);
 
         const data = await res.json();
-        
-        if (!data.data || !Array.isArray(data.data)) {
-          throw new Error('API 返回格式异常');
+        if (!data.data || !Array.isArray(data.data)) throw new Error('API 返回格式异常');
+
+        const models = normalizeModelList(
+          data.data.map((item: any) => ({
+            id: item?.id,
+            name: item?.name || item?.id,
+            provider: snapshot.provider,
+            contextLength: item?.context_window,
+          })),
+          snapshot.provider,
+        );
+        const selectedModel = chooseAvailableModel(
+          snapshot.model,
+          models,
+          PROVIDERS[snapshot.provider]?.model || '',
+        );
+        if (models.length === 0) throw new Error('API 未返回可用模型');
+
+        // 请求返回后再次确认供应商连接未发生变化，避免旧结果写错卡片
+        const currentSettings = settingsRef.current ?? settings;
+        if (
+          requestId !== modelDetectionRequestRef.current ||
+          !sameProviderConnection(
+            {
+              id: profileIdAtRequest || '__settings__',
+              name: '',
+              provider: currentSettings.provider,
+              apiKey: currentSettings.apiKey,
+              apiKeys: currentSettings.apiKeys,
+              currentKeyIndex: currentSettings.currentKeyIndex,
+              baseUrl: currentSettings.baseUrl,
+              model: currentSettings.model,
+              availableModels: currentSettings.availableModels,
+              updatedAt: 0,
+            },
+            snapshot,
+          ) ||
+          activeProfileIdRef.current !== profileIdAtRequest
+        ) {
+          pushToast('供应商已切换，本次检测结果已忽略', 'info');
+          return;
         }
 
-        const models: ModelInfo[] = data.data.map((m: any) => ({
-          id: m.id,
-          name: m.id,
-          provider: settings.provider,
-          contextLength: m.context_window
-        }));
+        const nextSettings: Settings = {
+          ...currentSettings,
+          model: selectedModel,
+          availableModels: models,
+        };
+        setSettings(prev => sameProviderConnection(
+          {
+            id: '__settings__',
+            name: '',
+            provider: prev.provider,
+            apiKey: prev.apiKey,
+            apiKeys: prev.apiKeys,
+            currentKeyIndex: prev.currentKeyIndex,
+            baseUrl: prev.baseUrl,
+            model: prev.model,
+            availableModels: prev.availableModels,
+            updatedAt: 0,
+          },
+          snapshot,
+        ) ? nextSettings : prev);
 
-        setSettings({ ...settings, availableModels: models });
-        // 同步到当前卡片
-        if (activeProfileId) {
-          setProviderProfiles(prev => prev.map(p =>
-            p.id === activeProfileId
-              ? { ...p, availableModels: models, model: settings.model || p.model, updatedAt: Date.now() }
-              : p
-          ));
-        }
-        pushToast(`检测成功！共发现 ${models.length} 个可用模型`, 'success');
+        const currentProfile = profileIdAtRequest
+          ? providerProfilesRef.current.find(profile => profile.id === profileIdAtRequest)
+          : providerProfilesRef.current.find(profile => sameProviderConnection(profile, snapshot));
+        const nextProfile = currentProfile
+          ? profileFromSettings(nextSettings, currentProfile.name, currentProfile.id)
+          : profileFromSettings(
+              nextSettings,
+              profileNameDraftRef.current.trim() || `${PROVIDERS[snapshot.provider]?.label || snapshot.provider} · ${selectedModel}`,
+            );
+
+        providerProfilesRef.current = currentProfile
+          ? providerProfilesRef.current.map(profile => profile.id === nextProfile.id ? nextProfile : profile)
+          : [...providerProfilesRef.current, nextProfile];
+        setProviderProfiles(prev => {
+          const exists = prev.some(profile => profile.id === nextProfile.id);
+          return exists
+            ? prev.map(profile => profile.id === nextProfile.id ? nextProfile : profile)
+            : [...prev, nextProfile];
+        });
+        activeProfileIdRef.current = nextProfile.id;
+        setActiveProfileId(nextProfile.id);
+        setEditingProfileId(nextProfile.id);
+        setProfileNameDraft(nextProfile.name);
+        pushToast(`检测成功！共发现 ${models.length} 个可用模型，当前使用：${selectedModel || '未选择'}`, 'success');
       },
     });
   };
@@ -2237,7 +2420,7 @@ export default function App() {
           onClearTask={clearTask}
         />
 
-        <main className={`flex-1 min-h-0 overflow-y-auto ${activeTab === 'chapters' ? 'p-0' : 'p-5 md:p-8'}`}>
+        <main className={`flex-1 min-h-0 ${activeTab === 'chapters' ? 'p-0 overflow-hidden flex flex-col' : 'overflow-y-auto p-5 md:p-8'}`}>
           {activeTab !== 'settings' && !settingsReady(settings).ok && (
             <div className="mx-5 md:mx-8 mt-4 mb-0 rounded-xl border border-amber-200 bg-amber-50/90 px-3 py-2 text-sm text-amber-900 flex flex-wrap items-center justify-between gap-2">
               <span>设置未就绪：{settingsReady(settings).reason || '请完善 API 配置'}（开始生成前请先配置）</span>

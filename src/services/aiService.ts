@@ -270,9 +270,14 @@ async function callOpenAIWithKey(
     headers['Authorization'] = `Bearer ${apiKey}`;
   }
 
+  const model = settings.model?.trim();
+  if (!model) {
+    return { success: false, error: 'No model is configured for the selected provider.' };
+  }
+
   const messages = [{ role: 'user', content: prompt }];
   const body: any = {
-    model: settings.model || 'gpt-3.5-turbo',
+    model,
     messages,
     temperature: settings.temperature || 0.9
   };

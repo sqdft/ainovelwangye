@@ -68,9 +68,12 @@ function lsSet<T>(key: string, value: T): void {
 
 // 双层读取：优先 IndexedDB，回退 localStorage
 export async function dualGet<T>(key: string, fallback: T): Promise<T> {
+  const isConfigKey = key === 'ai_novel_settings' || key === 'ai_novel_provider_profiles' || key === 'ai_novel_active_profile_id';
+  const lsVal = lsGet<T>(key);
+  if (isConfigKey && lsVal !== null) return lsVal;
+
   const idbVal = await idbGet<T>(key);
   if (idbVal !== null) return idbVal;
-  const lsVal = lsGet<T>(key);
   if (lsVal !== null) return lsVal;
   return fallback;
 }

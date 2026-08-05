@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import {
   BookOpen,
+  Check,
   ChevronDown,
+  Copy,
   Feather,
   FileText,
   List,
@@ -89,6 +91,34 @@ export function ChaptersPanel(props: ChaptersPanelProps) {
   } = props;
 
   const [rewriteDirective, setRewriteDirective] = useState('');
+  const [shortCopied, setShortCopied] = useState(false);
+
+  const copyShortStoryContent = async () => {
+    const content = shortStoryInfo.content || '';
+    if (!content.trim()) return;
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(content);
+      } else {
+        const helper = document.createElement('textarea');
+        helper.value = content;
+        helper.setAttribute('readonly', '');
+        helper.style.position = 'fixed';
+        helper.style.opacity = '0';
+        document.body.appendChild(helper);
+        helper.select();
+        const copied = document.execCommand('copy');
+        helper.remove();
+        if (!copied) throw new Error('copy command failed');
+      }
+      setShortCopied(true);
+      window.setTimeout(() => setShortCopied(false), 1800);
+    } catch (error) {
+      console.warn('\u590d\u5236\u77ed\u6545\u4e8b\u6b63\u6587\u5931\u8d25:', error);
+      setShortCopied(false);
+    }
+  };
 
   const shortWordCount = (shortStoryInfo.content || '').replace(/\s/g, '').length;
   const shortTarget = Math.max(shortStoryInfo.targetWordCount || 10000, 1);
@@ -98,208 +128,237 @@ export function ChaptersPanel(props: ChaptersPanelProps) {
   const writtenCount = Object.keys(chapters).length;
   const missingCount = toc.filter(t => !chapters[t.chapterNumber]).length;
 
+  const renderProse = (content: string) =>
+    content.split(/\n{2,}/).filter(paragraph => paragraph.trim()).map((paragraph, index) => (
+      <p key={index}>{paragraph}</p>
+    ));
 
 
-    if (mode === 'shortStory') {
-      return (
-        <div className="h-full min-h-0 max-w-5xl mx-auto w-full rounded-xl border border-stone-200 bg-white shadow-sm flex flex-col overflow-hidden">
-          <div className="p-4 border-b border-stone-200 flex justify-between items-center bg-white shrink-0 gap-2 flex-wrap">
-            <h3 className="font-semibold text-lg text-[var(--ui-ink)]">
-              {shortStoryInfo.title || '未命名短篇'}
-            </h3>
-            <div className="flex items-center gap-2">
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={() => setShowShortResetMenu(v => !v)}
-                  className="ui-btn-secondary"
-                >
-                  <RefreshCw className="w-4 h-4" />
-                  重置
-                  <ChevronDown className={`w-3 h-3 transition-transform ${showShortResetMenu ? 'rotate-180' : ''}`} />
-                </button>
-                {showShortResetMenu && (
-                  <div className="ui-menu right-0 top-full mt-1 w-48">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (confirm('确定要清空当前正文内容吗？保留标题和大纲。')) {
-                          setShortStoryInfo({ ...shortStoryInfo, content: '', currentSegment: 0, segments: (shortStoryInfo.segments || []).map(s => ({ ...s, content: '', isGenerated: false })) });
-                          setShowShortResetMenu(false);
-                        }
-                      }}
-                      className="ui-menu-item"
-                    >
-                      仅清空正文
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (confirm('确定要重置整个故事吗？这将清空标题、大纲、正文等所有内容，但保留API设置。')) {
-                          setShortStoryInfo({
-                            title: '',
-                            themes: [SHORT_STORY_THEME_NAMES[0]],
-                            targetWordCount: 10000,
-                            outline: '',
-                            content: '',
-                            segments: [],
-                            currentSegment: 0,
-                            isOutlineGenerated: false
-                          });
-                          setShortStoryTitleOptions([]);
-                          setShowShortResetMenu(false);
-                        }
-                      }}
-                      className="ui-menu-item text-red-600 hover:bg-red-50"
-                    >
-                      重置所有故事信息
-                    </button>
-                  </div>
-                )}
-              </div>
-              <div className="flex gap-2 flex-wrap">
-                <button
-                  onClick={() => onGenerateShort({})}
-                  disabled={isTaskBusy || (!shortStoryInfo.outline && !(shortStoryInfo.segments?.length))}
-                  className="ui-btn-primary disabled:opacity-70"
-                >
-                  {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
-                  {shortStoryInfo.segments?.length
-                    ? ((shortStoryInfo.segments.findIndex(s => !s.isGenerated) < 0)
-                      ? '全部分段已写完'
-                      : `生成当前段：${shortStoryInfo.segments.find(s => !s.isGenerated)?.title || '下一段'}`)
-                    : (shortStoryInfo.content ? '继续写' : '开始生成')}
-                </button>
-                {!!shortStoryInfo.content && (
-                  <button
-                    onClick={() => onGenerateShort({ forceFinal: true })}
-                    disabled={isTaskBusy}
-                    className="ui-btn-secondary disabled:opacity-70"
-                  >
-                    {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Feather className="w-4 h-4" />}
-                    生成结局（收尾）
-                  </button>
-                )}
-              </div>
-            </div>
+
+  if (mode === 'shortStory') {
+    const generatedSegments = shortStoryInfo.segments?.filter(s => s.isGenerated).length || 0;
+    const totalSegments = shortStoryInfo.segments?.length || 0;
+    const progressPercent = Math.min(100, Math.round((shortWordCount / shortTarget) * 100));
+
+    return (
+      <section className="ui-short-story-workspace" aria-label="短故事正文工作台">
+        <header className="ui-short-story-header">
+          <div className="min-w-0">
+            <p className="ui-short-story-kicker">短篇正文</p>
+            <h3 className="ui-short-story-title">{shortStoryInfo.title || '未命名短篇'}</h3>
+            <p className="ui-short-story-subtitle">
+              {totalSegments > 0
+                ? `共 ${totalSegments} 段 · 已完成 ${generatedSegments} 段`
+                : '可以直接阅读、编辑或继续生成正文'}
+            </p>
           </div>
-          {/* 分段结构工作台 */}
-          {(shortStoryInfo.segments?.length > 0 || shortStoryInfo.content) && (
-            <div className="px-4 py-3 bg-[var(--ui-accent-soft)] border-b border-[rgba(196,92,38,0.2)] space-y-2">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <span className="text-sm text-[var(--ui-accent-text)]">
-                  短篇结构 · 总字数 {shortStoryInfo.content.length} 字
-                  {shortStoryInfo.segments?.length ? ` · 已完成 ${shortStoryInfo.segments.filter(s => s.isGenerated).length}/${shortStoryInfo.segments.length} 段` : ''}
-                </span>
-                <span className="text-xs text-[var(--ui-accent)]">逐段生成 · 可单独重写 · 末段自动收尾</span>
-              </div>
-              {shortStoryInfo.segments?.length > 0 && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                  {shortStoryInfo.segments.map((seg, idx) => (
-                    <div key={seg.segmentNumber} className="ui-card p-3 flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium text-[var(--ui-ink)]">
-                          {seg.segmentNumber}. {seg.title}
-                          <span className={`ml-2 text-xs ${seg.isGenerated ? 'text-[var(--ui-success)]' : 'text-[var(--ui-muted)]'}`}>
-                            {seg.isGenerated ? '已写' : '未写'}
-                          </span>
-                        </div>
-                        <p className="text-xs text-[var(--ui-muted)] mt-1 line-clamp-2">{seg.summary}</p>
-                      </div>
-                      <div className="flex flex-col gap-1 shrink-0">
-                        <button
-                          type="button"
-                          disabled={isTaskBusy}
-                          onClick={() => onGenerateShort({ segmentIndex: idx, rewrite: seg.isGenerated })}
-                          className="ui-btn-ghost text-xs disabled:opacity-50"
-                        >
-                          {seg.isGenerated ? '重写本段' : '生成本段'}
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+          <div className="ui-short-story-actions">
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowShortResetMenu(v => !v)}
+                className="ui-btn-secondary"
+              >
+                <RefreshCw className="w-4 h-4" />
+                重置
+                <ChevronDown className={`w-3 h-3 transition-transform ${showShortResetMenu ? 'rotate-180' : ''}`} />
+              </button>
+              {showShortResetMenu && (
+                <div className="ui-menu right-0 top-full mt-1 w-52">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (confirm('确定要清空当前正文和所有分段内容吗？')) {
+                        setShortStoryInfo({
+                          ...shortStoryInfo,
+                          content: '',
+                          currentSegment: 0,
+                          segments: (shortStoryInfo.segments || []).map(s => ({ ...s, content: '', isGenerated: false })),
+                        });
+                        setShowShortResetMenu(false);
+                      }
+                    }}
+                    className="ui-menu-item"
+                  >
+                    仅清空正文
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (confirm('确定要重置所有故事信息吗？这将清空标题、分段和正文，但不会影响 API 配置。')) {
+                        setShortStoryInfo({
+                          title: '',
+                          themes: [SHORT_STORY_THEME_NAMES[0]],
+                          targetWordCount: 10000,
+                          outline: '',
+                          content: '',
+                          segments: [],
+                          currentSegment: 0,
+                          isOutlineGenerated: false,
+                        });
+                        setShortStoryTitleOptions([]);
+                        setShowShortResetMenu(false);
+                      }
+                    }}
+                    className="ui-menu-item text-red-600 hover:bg-red-50"
+                  >
+                    重置所有故事信息
+                  </button>
                 </div>
               )}
             </div>
-          )}
-          
-                    <div className="px-4 py-2 border-b border-stone-100 flex items-center gap-2 bg-white shrink-0">
-            <div className="ui-seg">
+            <button
+              type="button"
+              onClick={() => onGenerateShort({})}
+              disabled={isTaskBusy || (!shortStoryInfo.outline && !totalSegments)}
+              className="ui-btn-primary disabled:opacity-70"
+            >
+              {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+              {totalSegments
+                ? (generatedSegments >= totalSegments
+                  ? '已全部生成'
+                  : `生成：${shortStoryInfo.segments?.find(s => !s.isGenerated)?.title || '下一段'}`)
+                : (shortStoryInfo.content ? '继续生成' : '生成正文')}
+            </button>
+            {!!shortStoryInfo.content && (
               <button
                 type="button"
+                onClick={() => onGenerateShort({ forceFinal: true })}
+                disabled={isTaskBusy}
+                className="ui-btn-secondary disabled:opacity-70"
+              >
+                {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Feather className="w-4 h-4" />}
+                生成最终稿
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => void copyShortStoryContent()}
+              disabled={!shortStoryInfo.content?.trim()}
+              className="ui-btn-secondary ui-short-story-copy disabled:opacity-50"
+              title="复制完整短故事正文"
+            >
+              {shortCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+              {shortCopied ? '已复制' : '复制全文'}
+            </button>
+          </div>
+        </header>
+
+        <div className="ui-short-story-overview">
+          <div className="ui-short-story-overview-line">
+            <span className="ui-short-story-overview-label">正文进度</span>
+            <span className="tabular-nums font-semibold">{shortWordCount.toLocaleString()} / {shortTarget.toLocaleString()} 字</span>
+            <span className="ui-short-story-overview-note">
+              {shortNearEnd ? '已接近目标字数' : '继续生成，逐步完善故事'}
+            </span>
+          </div>
+          <div className="ui-short-story-progress-track" aria-label={`正文进度 ${progressPercent}%`}>
+            <span style={{ width: `${progressPercent}%` }} />
+          </div>
+        </div>
+
+        {totalSegments > 0 && (
+          <section className="ui-short-story-segments" aria-label="分段结构">
+            <div className="ui-short-story-section-heading">
+              <div>
+                <h4>分段结构</h4>
+                <p>逐段生成，也可以单独重写某一段</p>
+              </div>
+              <span>{generatedSegments}/{totalSegments} 段已完成</span>
+            </div>
+            <div className="ui-short-story-segment-grid">
+              {shortStoryInfo.segments?.map((seg, idx) => (
+                <article key={seg.segmentNumber} className="ui-short-story-segment-card">
+                  <div className="ui-short-story-segment-topline">
+                    <span className="ui-short-story-segment-number">{seg.segmentNumber}</span>
+                    <span className={`ui-short-story-segment-status ${seg.isGenerated ? 'is-done' : ''}`}>
+                      {seg.isGenerated ? '已写' : '未写'}
+                    </span>
+                  </div>
+                  <h5>{seg.title}</h5>
+                  <p>{seg.summary || '暂无分段说明'}</p>
+                  <button
+                    type="button"
+                    disabled={isTaskBusy}
+                    onClick={() => onGenerateShort({ segmentIndex: idx, rewrite: seg.isGenerated })}
+                    className="ui-short-story-segment-action disabled:opacity-50"
+                  >
+                    {seg.isGenerated ? '重写本段' : '生成本段'}
+                  </button>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
+
+        <div className="ui-short-story-main">
+          <div className="ui-short-story-modebar">
+            <div className="ui-seg" role="tablist" aria-label="正文模式">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={chapterReadMode}
                 onClick={() => setChapterReadMode(true)}
                 className={chapterReadMode ? 'ui-seg-active' : 'ui-seg-idle'}
               >
-                阅读
+                <BookOpen className="w-3.5 h-3.5" /> 阅读
               </button>
               <button
                 type="button"
+                role="tab"
+                aria-selected={!chapterReadMode}
                 onClick={() => setChapterReadMode(false)}
                 className={!chapterReadMode ? 'ui-seg-active' : 'ui-seg-idle'}
               >
-                编辑
+                <FileText className="w-3.5 h-3.5" /> 编辑
               </button>
             </div>
-            <span className="text-xs text-[var(--ui-muted)]">同一份正文，仅切换展示</span>
-          </div>
-          
-          <div className="px-4 py-2 border-b border-stone-100 bg-white text-xs text-stone-600 flex flex-wrap gap-x-4 gap-y-1 items-center shrink-0">
-            <span className="tabular-nums font-medium text-stone-800">字数 {shortWordCount} / {shortTarget}</span>
-            <span className="flex-1 min-w-[6rem] h-1.5 bg-stone-100 rounded-full overflow-hidden">
-              <span className="block h-full bg-[var(--ui-accent)] rounded-full" style={{ width: `${Math.min(100, Math.round((shortWordCount / shortTarget) * 100))}%` }} />
+            <span className="ui-short-story-modehint">
+              {chapterReadMode ? '沉浸式阅读：宽版稿纸，减少无意义滚动' : '编辑模式：整块写作区，输入内容会自动保存'}
             </span>
-            {shortNearEnd ? (
-              <span className="text-amber-700 font-medium">接近目标，建议「生成结局」收束</span>
-            ) : (
-              <span className="text-stone-500">未到目标可继续写段</span>
-            )}
+            <div className="ui-short-story-inline-stats">
+              <span>正文 {shortWordCount.toLocaleString()} 字</span>
+              {isGenerating && <span className="ui-short-story-generating"><Loader2 className="w-3.5 h-3.5 animate-spin" /> 正在生成</span>}
+            </div>
           </div>
 
-              <div className="mx-3 mt-2 mb-1 rounded-xl border border-[var(--ui-line)] bg-white/70 px-3 py-2 text-xs text-[var(--ui-ink)] flex flex-wrap gap-x-4 gap-y-1 items-center shrink-0">
-                <span className="tabular-nums font-semibold">
-                  本章字数 {activeChapterNum != null ? activeWordCount : 0}
-                  <span className="text-[var(--ui-muted)] font-normal"> / 目标约 {minWordCount}</span>
-                </span>
-                <span className="tabular-nums">全书 {writtenCount}/{targetChapterCount || toc.length || 0} 章</span>
-                {isBatchGenerating && generatingChapterNum != null && (
-                  <span className="text-[var(--ui-accent-text)] font-medium">批量中 · 正在第 {generatingChapterNum} 章 · 待补 {missingCount}</span>
-                )}
-                {!isBatchGenerating && missingCount > 0 && (
-                  <span className="text-[var(--ui-muted)]">待补缺章 {missingCount}</span>
-                )}
-              </div>
-<div className="flex-1 min-h-0 p-4 md:p-6 overflow-y-auto bg-white/20">
+          <div className={`ui-short-story-content ${chapterReadMode ? 'is-reading' : 'is-editing'}`}>
             {shortStoryInfo.content ? (
               chapterReadMode ? (
-                <div className="ui-prose-read py-2">{shortStoryInfo.content}</div>
+                <article className="ui-short-story-paper ui-prose-read">
+                  {renderProse(shortStoryInfo.content)}
+                </article>
               ) : (
-                <textarea
-                  value={shortStoryInfo.content}
-                  onChange={(e) => setShortStoryInfo({ ...shortStoryInfo, content: e.target.value })}
-                  placeholder="在此编辑正文…"
-                  className="ui-input w-full min-h-[calc(100vh-16rem)] max-w-3xl mx-auto block p-5 resize-y leading-7 bg-white"
-                />
+                <div className="ui-short-story-editor-wrap">
+                  <textarea
+                    value={shortStoryInfo.content}
+                    onChange={(e) => setShortStoryInfo({ ...shortStoryInfo, content: e.target.value })}
+                    placeholder="可以直接编辑正文，内容会自动保存"
+                    className="ui-input ui-short-story-editor"
+                  />
+                </div>
               )
             ) : (
-              <div className="ui-empty min-h-[280px] flex flex-col items-center justify-center">
+              <div className="ui-empty ui-short-story-empty">
                 {isGenerating ? (
                   <>
                     <Loader2 className="w-10 h-10 mb-3 animate-spin text-[var(--ui-accent)]" />
-                    <p className="text-[var(--ui-muted)]">AI 正在写作…</p>
+                    <p className="text-[var(--ui-muted)]">AI 正在生成正文...</p>
                   </>
                 ) : (
                   <>
                     <FileText className="w-10 h-10 mb-3 text-stone-300" />
                     <p className="text-[var(--ui-muted)]">尚无正文</p>
-                    <p className="text-xs text-[var(--ui-muted)] mt-1">点击右上角开始生成，或切换到编辑后手动输入</p>
+                    <p className="text-xs text-[var(--ui-muted)] mt-1">点击上方开始生成，或切换到编辑后手动输入</p>
                   </>
                 )}
               </div>
             )}
           </div>
         </div>
-      );
-    }
+      </section>
+    );
+  }
 
     return (
       <div className="ui-chapter-workspace flex h-full min-h-0 overflow-hidden">
@@ -554,9 +613,9 @@ export function ChaptersPanel(props: ChaptersPanelProps) {
               <div className="flex-1 min-h-0 p-4 md:p-6 overflow-y-auto bg-white/20">
                 {chapters[activeChapterNum] ? (
                   chapterReadMode && !(isGenerating && generatingChapterNum === activeChapterNum) ? (
-                    <div className="ui-prose-read py-4">{chapters[activeChapterNum]}</div>
+                    <article className="ui-prose-read py-4">{renderProse(chapters[activeChapterNum])}</article>
                   ) : (
-                    <div className="max-w-3xl mx-auto w-full">
+                    <div className="ui-chapter-editor-shell">
                       {isGenerating && generatingChapterNum === activeChapterNum && (
                         <p className="text-xs text-[var(--ui-accent-text)] mb-2 flex items-center gap-1">
                           <Loader2 className="w-3 h-3 animate-spin" /> 流式生成中…点顶栏「停止」可中断请求
@@ -565,7 +624,7 @@ export function ChaptersPanel(props: ChaptersPanelProps) {
                       <textarea
                         value={chapters[activeChapterNum]}
                         onChange={(e) => setChapters(prev => ({ ...prev, [activeChapterNum]: e.target.value }))}
-                        className="ui-input w-full h-full min-h-[calc(100vh-14rem)] max-w-3xl mx-auto block p-5 resize-y leading-7 bg-white"
+                        className="ui-input ui-chapter-editor"
                       />
                     </div>
                   )
