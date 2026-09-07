@@ -1,5 +1,6 @@
-import { Loader2, RefreshCw } from 'lucide-react';
-import type { Provider, ProviderProfile, Settings } from '../../types';
+import { useState } from 'react';
+import { Loader2, RefreshCw, Save, Trash2 } from 'lucide-react';
+import type { PromptPreset, Provider, ProviderProfile, Settings } from '../../types';
 import { PROVIDERS } from '../../config/providers';
 
 export interface SettingsPanelProps {
@@ -18,6 +19,10 @@ export interface SettingsPanelProps {
   onSaveProfile: (asNew?: boolean) => void;
   onProviderChange: (provider: Provider) => void;
   onDetectModels: () => void;
+  promptPresets: PromptPreset[];
+  onSavePromptPreset: (name: string) => void;
+  onApplyPromptPreset: (id: string) => void;
+  onDeletePromptPreset: (id: string) => void;
 }
 
 export function SettingsPanel({
@@ -36,7 +41,30 @@ export function SettingsPanel({
   onSaveProfile,
   onProviderChange,
   onDetectModels,
+  promptPresets,
+  onSavePromptPreset,
+  onApplyPromptPreset,
+  onDeletePromptPreset,
 }: SettingsPanelProps) {
+  const [promptPresetName, setPromptPresetName] = useState('');
+  const promptOverride = settings.promptOverride || { globalPrefix: '', taskExtra: {} };
+  const updateOverride = (patch: Partial<Settings['promptOverride']>) => {
+    setSettings(prev => ({
+      ...prev,
+      promptOverride: {
+        globalPrefix: '',
+        taskExtra: {},
+        ...(prev.promptOverride || {}),
+        ...patch,
+      },
+    }));
+  };
+  const promptTasks = [
+    { key: 'chapter', label: '正文生成', placeholder: '如：多用动作推进，少心理独白；每三段安排一个小钩子' },
+    { key: 'bookInfo', label: '大纲/世界观', placeholder: '如：世界观规则优先闭环，避免无限扩展新体系' },
+    { key: 'characters', label: '人物关系', placeholder: '如：主角要有具体职业，反派动机与创伤绑定' },
+    { key: 'toc', label: '目录大纲', placeholder: '如：每章末留钩子；避免连续三章都是同一类型冲突' },
+  ] as const;
   return (
     <div className="max-w-2xl mx-auto space-y-6">
       <div className="ui-card p-6">
@@ -331,6 +359,100 @@ export function SettingsPanel({
                   '平衡模式，适合大多数创作场景'}
                 {(settings.temperature ?? 0.9) >= 1.2 && '激进模式，内容更自由大胆，可能包含成人内容'}
               </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mode === 'novel' && (
+        <div className="ui-card p-6">
+          <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+            <div>
+              <p className="text-xs font-semibold tracking-[.16em] uppercase text-[var(--ui-accent-text)]">Prompt 工坊</p>
+              <h2 className="text-xl font-semibold text-[var(--ui-ink)] mt-1">创作偏好与个人预设</h2>
+            </div>
+            <span className="ui-status-pill self-start">
+              <span className="w-1.5 h-1.5 rounded-full bg-[var(--ui-success)]" />
+              生成时自动注入
+            </span>
+          </div>
+
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-stone-700 mb-1">全局创作偏好</label>
+              <textarea
+                className="ui-input text-sm leading-relaxed"
+                rows={4}
+                placeholder="所有任务都会遵守。如：中文连载口吻；避免说教；人名称呼保持一致。"
+                value={promptOverride.globalPrefix || ''}
+                onChange={event => updateOverride({ globalPrefix: event.target.value })}
+              />
+            </div>
+
+            {promptTasks.map(task => (
+              <div key={task.key}>
+                <label className="block text-sm font-medium text-stone-700 mb-1">{task.label}附加指令</label>
+                <textarea
+                  className="ui-input text-sm leading-relaxed"
+                  rows={3}
+                  placeholder={task.placeholder}
+                  value={promptOverride.taskExtra?.[task.key] || ''}
+                  onChange={event => updateOverride({
+                    taskExtra: {
+                      ...(promptOverride.taskExtra || {}),
+                      [task.key]: event.target.value,
+                    },
+                  })}
+                />
+              </div>
+            ))}
+
+            <div className="rounded-xl border border-[var(--ui-line)] bg-white/70 p-3">
+              <p className="text-sm font-medium text-[var(--ui-ink)] mb-2">个人预设</p>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  className="ui-input flex-1 text-sm"
+                  placeholder="预设名称，如：都市爽文节奏"
+                  value={promptPresetName}
+                  onChange={event => setPromptPresetName(event.target.value)}
+                />
+                <button
+                  type="button"
+                  className="ui-btn-primary text-sm shrink-0"
+                  disabled={!promptPresetName.trim()}
+                  onClick={() => {
+                    onSavePromptPreset(promptPresetName.trim());
+                    setPromptPresetName('');
+                  }}
+                >
+                  <Save className="w-4 h-4 inline mr-1" />
+                  保存当前
+                </button>
+              </div>
+              {promptPresets.length === 0 ? (
+                <p className="text-xs text-[var(--ui-muted)] mt-2">保存后可以在不同文风之间一键切换。</p>
+              ) : (
+                <div className="mt-3 space-y-2">
+                  {promptPresets.map(preset => (
+                    <div key={preset.id} className="flex items-center justify-between gap-2 rounded-lg border border-[var(--ui-line)] px-2.5 py-2 bg-white/80">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-[var(--ui-ink)] truncate">{preset.name}</p>
+                        <p className="text-[10px] text-[var(--ui-muted)]">
+                          {new Date(preset.createdAt).toLocaleString()}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button type="button" className="ui-btn-secondary text-xs" onClick={() => onApplyPromptPreset(preset.id)}>
+                          应用
+                        </button>
+                        <button type="button" className="text-red-400 hover:text-red-600 p-1" title="删除预设" onClick={() => onDeletePromptPreset(preset.id)}>
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>

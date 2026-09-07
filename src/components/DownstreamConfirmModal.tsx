@@ -6,6 +6,7 @@ export type DownstreamConfirmState = {
   detail?: string;
   preferredLevel: DownstreamLevel;
   apply: () => void;
+  repairApply?: () => void;
 } | null;
 
 const OPTIONS: { level: DownstreamLevel; label: string; desc: string }[] = [
@@ -48,6 +49,16 @@ export function DownstreamConfirmModal({
             </button>
           ))}
         </div>
+        {state.repairApply && (
+          <button
+            type="button"
+            onClick={state.repairApply}
+            className="mt-3 w-full text-left rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-2.5 transition hover:bg-emerald-100"
+          >
+            <div className="text-sm font-semibold text-emerald-800">不清理，改完后 AI 逐步修复已生成章节（推荐）</div>
+            <div className="text-[11px] text-emerald-700 mt-0.5">AI 先分析受影响章节，再逐章修订；每章完成即保存，原稿进入历史版本。</div>
+          </button>
+        )}
         <div className="mt-4 flex justify-end gap-2">
           <button type="button" className="ui-btn-secondary text-sm" onClick={onCancel}>
             取消修改

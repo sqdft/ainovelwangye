@@ -10,6 +10,83 @@ export interface Settings {
   availableModels: ModelInfo[]; // 可用模型列表
   minWordCount: number;
   temperature: number; // 温度参数，控制创作自由度 (0-2)
+  promptOverride?: PromptOverride; // Prompt 工坊：创作偏好注入
+}
+
+export type PromptTaskKey = 'chapter' | 'bookInfo' | 'characters' | 'toc' | 'shortContent';
+
+export interface PromptOverride {
+  globalPrefix: string; // 注入所有生成任务的全局创作偏好
+  taskExtra: Partial<Record<PromptTaskKey, string>>; // 按任务的附加指令
+}
+
+export interface PromptPreset {
+  id: string;
+  name: string;
+  override: PromptOverride;
+  createdAt: number;
+}
+
+export type EntityCardType = 'character' | 'location' | 'item' | 'faction' | 'thread';
+
+export interface EntityCard {
+  id: string;
+  name: string;
+  type: EntityCardType;
+  description: string;
+  keywords: string[]; // 命中关键词才注入；pinned 则每章必注入
+  pinned: boolean;
+  enabled: boolean;
+  createdAt: number;
+}
+
+export interface StyleCard {
+  id: string;
+  name: string;
+  traits: string; // AI 提取的风格特征，生成时注入
+  excerpt: string; // 原文样本（截断保存）
+  enabled: boolean;
+  createdAt: number;
+}
+
+export interface WritingEvent {
+  date: string; // YYYY-MM-DD
+  ts: number;
+  chapter: number;
+  words: number; // 相对上一版的增量
+}
+
+export interface ChapterVersion {
+  content: string;
+  words: number;
+  ts: number;
+  label: string;
+}
+
+export interface ChapterVersionMap {
+  [chapter: number]: ChapterVersion[];
+}
+
+export interface RepairTask {
+  chapterNumber: number;
+  reason: string;
+  selected: boolean;
+  done: boolean;
+}
+
+export interface RepairFlowState {
+  field: 'outline' | 'worldbuilding';
+  status: 'analyzing' | 'review' | 'repairing' | 'done';
+  tasks: RepairTask[];
+  currentIndex: number; // 正在修复第几章（1-based 计数），-1 未开始
+  bookInfoSnapshot: BookInfo; // 修复时使用的新版书籍设定
+}
+
+export interface ChapterDraft {
+  id: string;
+  content: string;
+  words: number;
+  angle: string;
 }
 
 

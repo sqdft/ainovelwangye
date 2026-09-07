@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   BookOpen,
   Settings as SettingsIcon,
@@ -18,10 +18,15 @@ import {
   Eye,
   Pencil,
   LayoutList,
+  ChartColumn,
+  LibraryBig,
   Rows3,
   Search
 } from 'lucide-react';
-import { Settings, BookInfo, Character, TOCItem, Provider, ShortStoryInfo, Realm, SubRealm, RealmProgress, ModelInfo, NovelMemory, ProviderProfile } from './types';
+import {
+  Settings, BookInfo, Character, TOCItem, Provider, ShortStoryInfo, Realm, SubRealm, RealmProgress, ModelInfo, NovelMemory, ProviderProfile,
+  EntityCard, StyleCard, WritingEvent, PromptPreset, ChapterVersionMap, RepairFlowState, ChapterDraft,
+} from './types';
 import { dualGet, dualSet, dualClearAll } from './lib/storage';
 import { useTaskRunner, settingsReady } from './orchestration';
 import { SettingsPanel } from './features/settings';
@@ -31,18 +36,28 @@ import { CharactersPanel } from './features/characters';
 import { RealmsPanel } from './features/realms';
 import { TocPanel } from './features/toc';
 import { ExamplesPanel } from './features/examples';
+import { EntitiesPanel } from './features/entities';
+import { StatsPanel } from './features/stats';
 import { DownstreamConfirmModal, type DownstreamConfirmState } from './components/DownstreamConfirmModal';
+import { WizardBanner, type WizardStepView } from './components/WizardBanner';
+import { MultiDraftModal } from './components/MultiDraftModal';
+import { RepairFlowBanner } from './components/RepairFlowBanner';
 import { MemoryPanel } from './features/memory';
 import type { DownstreamLevel } from './orchestration';
 
 import { AppHeader, AppSidebar, ToastStack, type ToastItem as LayoutToastItem } from './components/layout';
 import { normalizeBaseUrl, proxyFetch } from './lib/devProxy';
-import { generateBookInfo, generateCharacters, generateRealms, generateTOC, generateChapterContent, generateShortStoryContent, generateShortStoryTitles, generateShortStoryOutlineFromTitle, generateShortStorySegments, generateBookTitles, updateNovelMemory, type ChapterGenOptions } from './services/aiService';
+import {
+  generateBookInfo, generateCharacters, generateRealms, generateTOC, generateChapterContent, generateShortStoryContent, generateShortStoryTitles,
+  generateShortStoryOutlineFromTitle, generateShortStorySegments, generateBookTitles, updateNovelMemory,
+  extractStyleCard, extractEntityCards, analyzeOutlineRepair, repairChapterContent,
+  type ChapterGenOptions,
+} from './services/aiService';
 import { PROVIDERS, getProviderConfig } from './config/providers';
 import { MALE_THEME_NAMES, FEMALE_THEME_NAMES, SHORT_STORY_THEME_NAMES } from './config/themes';
 import { saveAs } from 'file-saver';
 
-type Tab = 'settings' | 'book' | 'characters' | 'realms' | 'toc' | 'chapters' | 'examples' | 'memory';
+type Tab = 'settings' | 'book' | 'characters' | 'realms' | 'toc' | 'entities' | 'stats' | 'chapters' | 'examples' | 'memory';
 type Mode = 'novel' | 'shortStory';
 
 type ToastKind = 'info' | 'success' | 'error' | 'warn';
@@ -190,7 +205,10 @@ function chooseAvailableModel(
   return models[0]?.id || current || fallbackModel;
 }
 
-function useDualStorage<T>(key: string, initialValue: T): [T, (value: T | ((val: T) => T)) => void, boolean] {
+function useDualStorage<T>(
+  key: string,
+  initialValue: T
+): [T, (value: T | ((val: T) => T)) => void, boolean, (value: T | ((val: T) => T)) => void] {
   const [storedValue, setStoredValue] = useState<T>(initialValue);
   const [loaded, setLoaded] = useState(false);
   const storedValueRef = useRef(storedValue);
@@ -205,15 +223,29 @@ function useDualStorage<T>(key: string, initialValue: T): [T, (value: T | ((val:
     });
   }, [key]);
 
-  const setValue = (value: T | ((val: T) => T)) => {
+  const setValue = useCallback((value: T | ((val: T) => T)) => {
     const valueToStore = value instanceof Function ? value(storedValueRef.current) : value;
     setStoredValue(valueToStore);
     storedValueRef.current = valueToStore;
     dualSet(key, valueToStore);
-  };
+  }, [key]);
 
   // 未加载完时返回初始值
-  return [loaded ? storedValue : initialValue, setValue, loaded];
+  const setValueMemoryOnly = useCallback((value: T | ((val: T) => T)) => {
+    const valueToStore = value instanceof Function ? value(storedValueRef.current) : value;
+    setStoredValue(valueToStore);
+    storedValueRef.current = valueToStore;
+  }, [key]);
+
+  return [loaded ? storedValue : initialValue, setValue, loaded, setValueMemoryOnly];
+}
+
+function useEventCallback<Args extends unknown[], Return>(
+  callback: (...args: Args) => Return
+): (...args: Args) => Return {
+  const callbackRef = useRef(callback);
+  callbackRef.current = callback;
+  return useCallback((...args: Args) => callbackRef.current(...args), []);
 }
 
 
@@ -520,7 +552,7 @@ export default function App() {
     chapterRealmMap: {}
   });
   const [toc, setToc] = useDualStorage<TOCItem[]>('ai_novel_toc', []);
-  const [chapters, setChapters] = useDualStorage<Record<number, string>>('ai_novel_chapters', {});
+  const [chapters, setChapters, , setChaptersMemory] = useDualStorage<Record<number, string>>('ai_novel_chapters', {});
   const [activeChapterNum, setActiveChapterNum] = useDualStorage<number | null>('ai_novel_activeChapterNum', null);
   const [novelMemory, setNovelMemory] = useDualStorage<NovelMemory>('ai_novel_memory', {
     storySoFar: '',
@@ -530,6 +562,27 @@ export default function App() {
     importantItems: [],
     lastUpdatedChapter: 0
   });
+  const [entityCards, setEntityCards] = useDualStorage<EntityCard[]>('ai_novel_entityCards', []);
+  const [styleCards, setStyleCards] = useDualStorage<StyleCard[]>('ai_novel_styleCards', []);
+  const [writingEvents, setWritingEvents] = useDualStorage<WritingEvent[]>('ai_novel_writingEvents', []);
+  const [promptPresets, setPromptPresets] = useDualStorage<PromptPreset[]>('ai_novel_promptPresets', []);
+  const [chapterVersions, setChapterVersions] = useDualStorage<ChapterVersionMap>('ai_novel_chapterVersions', {});
+  const [wizardDismissed, setWizardDismissed] = useDualStorage<boolean>('ai_novel_wizardDismissed', false);
+  const [repairFlow, setRepairFlow] = useState<RepairFlowState | null>(null);
+  const [chapterDrafts, setChapterDrafts] = useState<ChapterDraft[]>([]);
+  const [multiDraftOpen, setMultiDraftOpen] = useState(false);
+  const [multiDraftChapterNum, setMultiDraftChapterNum] = useState<number | null>(null);
+  const chaptersPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 章节编辑只更新内存，停顿后再统一持久化，避免每个按键都序列化整本书。
+  const handleChapterEditorChange = useCallback((chapterNum: number, value: string) => {
+    setChaptersMemory(prev => ({ ...prev, [chapterNum]: value }));
+    if (chaptersPersistTimerRef.current) clearTimeout(chaptersPersistTimerRef.current);
+    chaptersPersistTimerRef.current = setTimeout(() => {
+      chaptersPersistTimerRef.current = null;
+      setChapters(prev => prev);
+    }, 300);
+  }, [setChapters, setChaptersMemory]);
 
   // Short Story State
   const [shortStoryInfo, setShortStoryInfo] = useDualStorage<ShortStoryInfo>('ai_novel_shortStoryInfo', {
@@ -543,12 +596,13 @@ export default function App() {
     isOutlineGenerated: false
   });
   const [shortStoryTitleOptions, setShortStoryTitleOptions] = useDualStorage<string[]>('ai_novel_shortStoryTitleOptions', []);
+  const chapterCount = useMemo(() => Object.keys(chapters).length, [chapters]);
 
-  const novelProgress = (() => {
+  const novelProgress = useMemo(() => {
     const hasTitle = !!bookInfo.title && !!bookInfo.isTitleSelected;
     const hasChars = characters.length > 0;
     const hasToc = toc.length > 0;
-    const written = Object.keys(chapters).length;
+    const written = chapterCount;
     const target = Math.max(bookInfo.targetChapterCount || 1, 1);
     const chapterRatio = Math.min(written / target, 1);
     const score = (hasTitle ? 0.25 : 0) + (hasChars ? 0.25 : 0) + (hasToc ? 0.25 : 0) + 0.25 * chapterRatio;
@@ -563,9 +617,9 @@ export default function App() {
     else if (toc.length < target) nextHint = `下一步：补充目录（目录 ${toc.length}/${target}）`;
     else nextHint = '可导出全书，或精修章节';
     return { score, doneSteps, nextHint, written, target, tocCount: toc.length };
-  })();
+  }, [bookInfo.title, bookInfo.isTitleSelected, bookInfo.outline, bookInfo.targetChapterCount, characters.length, toc.length, chapterCount]);
 
-  const shortProgress = (() => {
+  const shortProgress = useMemo(() => {
     const hasTheme = (shortStoryInfo.themes || []).length > 0;
     const hasTitle = !!shortStoryInfo.title;
     const hasOutline = !!(shortStoryInfo.outline || '').trim();
@@ -593,7 +647,65 @@ export default function App() {
     else if (words < target * 0.9) nextHint = `下一步：继续写正文（约 ${words}/${target} 字）`;
     else nextHint = '可收束结局并导出';
     return { score, doneSteps, nextHint, words, target, doneSegs, segTotal: segs.length };
-  })();
+  }, [shortStoryInfo]);
+
+  const countChapterWords = (content: string) => (content || '').replace(/\s/g, '').length;
+  const formatDate = (date = new Date()) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+
+  const pushChapterVersion = (chapterNum: number, content: string, label: string) => {
+    if (!content?.trim()) return;
+    setChapterVersions(prev => {
+      const versions = prev[chapterNum] || [];
+      const next = [
+        {
+          content,
+          words: countChapterWords(content),
+          ts: Date.now(),
+          label,
+        },
+        ...versions,
+      ].slice(0, 20);
+      return { ...prev, [chapterNum]: next };
+    });
+  };
+
+  const recordWritingDelta = (chapterNum: number, nextContent: string, previousContent?: string) => {
+    const nextWords = countChapterWords(nextContent);
+    const previousWords = countChapterWords(previousContent || '');
+    const delta = nextWords - previousWords;
+    if (delta <= 0) return;
+    setWritingEvents(prev => [...prev, { date: formatDate(), ts: Date.now(), chapter: chapterNum, words: delta }]);
+  };
+
+  const pickEntityContext = (tocItem: TOCItem) => {
+    const haystack = `${tocItem.title || ''}\n${tocItem.summary || ''}`.toLowerCase();
+    const selected = entityCards
+      .filter(card => card.enabled && (
+        card.pinned ||
+        card.name.toLowerCase() && haystack.includes(card.name.toLowerCase()) ||
+        card.keywords.some(keyword => keyword && haystack.includes(keyword.toLowerCase()))
+      ))
+      .slice(0, 12);
+    if (selected.length === 0) return undefined;
+    const labels: Record<EntityCard['type'], string> = {
+      character: '人物',
+      location: '地点',
+      item: '物品/法宝',
+      faction: '势力/组织',
+      thread: '伏笔/约定',
+    };
+    const groups = Object.keys(labels) as Array<EntityCard['type']>;
+    const lines = groups.flatMap(group =>
+      selected.filter(card => card.type === group).map(card => `- ${card.name}：${card.description || '（暂无描述）'}`)
+    );
+    return `\n【本章实体设定（请严格保持一致）】\n${lines.join('\n')}`;
+  };
+
+  const activeStyleDirective = () => {
+    const traits = styleCards.filter(card => card.enabled).map(card => card.traits.trim()).filter(Boolean);
+    if (traits.length === 0) return undefined;
+    return `\n【写作风格（用户指定）】\n${traits.join('；')}\n模仿这些风格特征，但不要复述范文内容。`;
+  };
 
 
 
@@ -792,13 +904,14 @@ export default function App() {
     title: string,
     preferredLevel: DownstreamLevel,
     apply: () => void,
-    detail?: string
+    detail?: string,
+    repairApply?: () => void
   ) => {
     if (!hasNovelDownstreamData()) {
       apply();
       return;
     }
-    setDownstreamConfirm({ title, detail, preferredLevel, apply });
+    setDownstreamConfirm({ title, detail, preferredLevel, apply, repairApply });
   };
 
   const resolveDownstreamConfirm = (level: DownstreamLevel) => {
@@ -865,7 +978,10 @@ export default function App() {
       '修改大纲或世界观会影响人物、目录和正文，请选择清理范围。',
       'book',
       () => setBookInfo({ ...bookInfo, [field]: value }),
-      '若只想重写正文，可选「仅正文」。'
+      '若只想重写正文，可选「仅正文」。',
+      Object.keys(chapters).length > 0
+        ? () => { void startRepairFlow(field, value, () => setBookInfo({ ...bookInfo, [field]: value })); }
+        : undefined
     );
   };
 
@@ -1224,8 +1340,12 @@ export default function App() {
     genOpts?: ChapterGenOptions
   ) => {
     const previousContents: string[] = [];
+    const previousChapterNumbers: number[] = [];
     for (let i = 1; i < tocItem.chapterNumber; i++) {
-      if (currentChapters[i]) previousContents.push(currentChapters[i]);
+      if (currentChapters[i]) {
+        previousContents.push(currentChapters[i]);
+        previousChapterNumbers.push(i);
+      }
     }
     const previousContent = previousContents[previousContents.length - 1];
     const activeRealmProgress = bookInfo.enableRealms !== false ? realmProgress : undefined;
@@ -1239,7 +1359,13 @@ export default function App() {
       toc,
       activeRealmProgress,
       memory,
-      { ...genOpts, signal }
+      {
+        ...genOpts,
+        entityContext: genOpts?.entityContext || pickEntityContext(tocItem),
+        styleDirective: genOpts?.styleDirective || activeStyleDirective(),
+        previousChapterNumbers,
+        signal,
+      }
     );
     if (!content.trim()) {
       throw new Error('AI 返回的章节正文为空，请重试。');
@@ -1261,11 +1387,13 @@ export default function App() {
       });
     }
     let nextMemory = memory;
-    try {
-      nextMemory = await updateNovelMemory(memory, bookInfo, tocItem, content, settings);
-      setNovelMemory(nextMemory);
-    } catch (error) {
-      console.warn('更新全书记忆失败，本章正文已保留:', error);
+    if (!genOpts?.skipMemoryUpdate) {
+      try {
+        nextMemory = await updateNovelMemory(memory, bookInfo, tocItem, content, settings);
+        setNovelMemory(nextMemory);
+      } catch (error) {
+        console.warn('更新全书记忆失败，本章正文已保留:', error);
+      }
     }
     return { content, nextMemory };
   };
@@ -1301,6 +1429,7 @@ export default function App() {
       run: async () => {
         setGeneratingChapterNum(chapterNum);
         if (cancelTaskRef.current) throw new Error('已取消');
+        if (existing.trim()) pushChapterVersion(chapterNum, existing, mode === 'write' ? '重新生成前' : `AI ${mode}前`);
         const useStream = opts?.stream !== false && mode !== 'write' ? true : !!opts?.stream;
         // 单章：有正文的改写类默认流式；首次 write 也可流式
         const stream = opts?.stream !== false;
@@ -1310,13 +1439,14 @@ export default function App() {
           existingContent: existing,
           onChunk: stream
             ? (full) => {
-                setChapters(prev => ({ ...prev, [chapterNum]: full }));
+                setChaptersMemory(prev => ({ ...prev, [chapterNum]: full }));
                 setChapterReadMode(false);
               }
             : undefined,
         });
         if (cancelTaskRef.current) throw new Error('已取消');
         setChapters(prev => ({ ...prev, [chapterNum]: content }));
+        recordWritingDelta(chapterNum, content, existing);
         setActiveChapterNum(chapterNum);
         setActiveTab('chapters');
         setGeneratingChapterNum(null);
@@ -1406,10 +1536,12 @@ export default function App() {
             cancellable: true,
           });
           try {
+            const previousChapterContent = currentChapters[item.chapterNumber] || '';
             const { content, nextMemory } = await generateChapterWithQualityGate(item, currentChapters, currentMemory);
             currentMemory = nextMemory;
             currentChapters = { ...currentChapters, [item.chapterNumber]: content };
             setChapters(prev => ({ ...prev, [item.chapterNumber]: content }));
+            recordWritingDelta(item.chapterNumber, content, previousChapterContent);
             okCount += 1;
           } catch (error: any) {
             failed.push(item.chapterNumber);
@@ -1441,6 +1573,288 @@ export default function App() {
       setShortStoryTitleOptions(titles);
           },
     });
+  };
+
+  const handleRestoreChapterVersion = (chapterNum: number, versionIndex: number) => {
+    const versions = chapterVersions[chapterNum] || [];
+    const version = versions[versionIndex];
+    if (!version) return;
+    const current = chapters[chapterNum] || '';
+    if (current.trim()) pushChapterVersion(chapterNum, current, '恢复历史版本前');
+    setChapters(prev => ({ ...prev, [chapterNum]: version.content }));
+    recordWritingDelta(chapterNum, version.content, current);
+    setActiveChapterNum(chapterNum);
+    setActiveTab('chapters');
+    pushToast('已恢复历史版本', 'success');
+  };
+
+  const DRAFT_ANGLES = [
+    '冲突驱动：强化冲突与对抗张力，让每个场景都有明确对抗',
+    '情绪驱动：强化情绪渲染与人物内心，增强代入感',
+    '细节驱动：强化画面感、动作细节与物件质感',
+  ];
+
+  const handleGenerateChapterDrafts = async (chapterNum: number) => {
+    if (!ensureSettingsReady()) return;
+    const tocItem = toc.find(t => t.chapterNumber === chapterNum);
+    if (!tocItem) return;
+    await runTask({
+      kind: 'chapter',
+      label: `生成第 ${chapterNum} 章多稿`,
+      run: async () => {
+        setChapterDrafts([]);
+        setMultiDraftChapterNum(chapterNum);
+        setMultiDraftOpen(true);
+        const drafts: ChapterDraft[] = [];
+        for (let index = 0; index < DRAFT_ANGLES.length; index++) {
+          const angle = DRAFT_ANGLES[index];
+          try {
+            const { content } = await generateChapterWithQualityGate(tocItem, chapters, novelMemory, {
+              mode: 'write',
+              directive: angle,
+              skipMemoryUpdate: true,
+            });
+            const draft: ChapterDraft = {
+              id: `draft_${Date.now()}_${index}`,
+              content,
+              words: countChapterWords(content),
+              angle,
+            };
+            drafts.push(draft);
+            setChapterDrafts([...drafts]);
+          } catch (error: any) {
+            if (drafts.length === 0 && index === DRAFT_ANGLES.length - 1) throw error;
+            pushToast(`第 ${index + 1} 版多稿失败：${error.message || '未知错误'}`, 'warn');
+          }
+        }
+        if (drafts.length === 0) {
+          setMultiDraftOpen(false);
+          throw new Error('多稿生成失败，请稍后重试');
+        }
+        pushToast(`已生成 ${drafts.length} 版多稿，请在弹窗中择优`, 'success');
+      },
+    });
+  };
+
+  const handlePickChapterDraft = async (draft: ChapterDraft) => {
+    if (multiDraftChapterNum == null) return;
+    const chapterNum = multiDraftChapterNum;
+    const current = chapters[chapterNum] || '';
+    if (current.trim()) pushChapterVersion(chapterNum, current, '多稿替换前');
+    setChapters(prev => ({ ...prev, [chapterNum]: draft.content }));
+    recordWritingDelta(chapterNum, draft.content, current);
+    setActiveChapterNum(chapterNum);
+    setActiveTab('chapters');
+    setMultiDraftOpen(false);
+    setChapterDrafts([]);
+    pushToast(`已选用「${draft.angle.split('：')[0]}」版本`, 'success');
+    const tocItem = toc.find(item => item.chapterNumber === chapterNum);
+    if (!tocItem) return;
+    try {
+      const nextMemory = await updateNovelMemory(novelMemory, bookInfo, tocItem, draft.content, settings);
+      setNovelMemory(nextMemory);
+    } catch (error) {
+      console.warn('更新多稿全书记忆失败，选定正文已保留:', error);
+      pushToast('已选定正文，但全书记忆更新失败', 'warn');
+    }
+  };
+
+  const startRepairFlow = async (
+    field: 'outline' | 'worldbuilding',
+    value: string,
+    apply: () => void
+  ) => {
+    if (Object.keys(chapters).length === 0) {
+      apply();
+      return;
+    }
+    const bookInfoSnapshot: BookInfo = { ...bookInfo, [field]: value };
+    apply();
+    setRepairFlow({
+      field,
+      status: 'analyzing',
+      tasks: [],
+      currentIndex: -1,
+      bookInfoSnapshot,
+    });
+    await runTask({
+      kind: 'chapter',
+      label: '分析设定变更影响',
+      run: async () => {
+        try {
+          const repairs = await analyzeOutlineRepair(bookInfoSnapshot, toc, field, settings);
+          setRepairFlow(prev => prev && prev.field === field ? {
+            ...prev,
+            status: 'review',
+            tasks: repairs.map(item => ({ ...item, selected: true, done: false })),
+          } : prev);
+        } catch (error: any) {
+          setRepairFlow(prev => prev && prev.field === field ? { ...prev, status: 'review', tasks: [] } : prev);
+          pushToast(`AI 影响分析失败，可稍后手动重开新书或修复：${error.message || error}`, 'warn');
+        }
+      },
+    });
+  };
+
+  const runRepairs = async () => {
+    if (!repairFlow || repairFlow.status !== 'review') return;
+    const flow = repairFlow;
+    const selectedTasks = flow.tasks.filter(task => task.selected && !task.done);
+    if (selectedTasks.length === 0) return;
+    setRepairFlow({ ...flow, status: 'repairing', currentIndex: selectedTasks[0].chapterNumber });
+    stopBatchRef.current = false;
+    cancelTaskRef.current = false;
+    await runTask({
+      kind: 'chapter',
+      label: 'AI 逐步修复正文',
+      progress: { current: 0, total: selectedTasks.length },
+      run: async () => {
+        const currentChapters = { ...chapters };
+        let done = 0;
+        let lastChapter = 0;
+        for (const task of selectedTasks) {
+          if (stopBatchRef.current || cancelTaskRef.current) break;
+          const tocItem = toc.find(t => t.chapterNumber === task.chapterNumber);
+          const original = currentChapters[task.chapterNumber] || '';
+          if (!tocItem || !original.trim()) {
+            setRepairFlow(prev => prev ? {
+              ...prev,
+              tasks: prev.tasks.map(item => item.chapterNumber === task.chapterNumber ? { ...item, done: true } : item),
+            } : prev);
+            continue;
+          }
+          try {
+            const content = await repairChapterContent(flow.bookInfoSnapshot, tocItem, original, task.reason, settings);
+            if (cancelTaskRef.current) throw new Error('已取消');
+            pushChapterVersion(task.chapterNumber, original, 'AI 修复前');
+            setChapters(prev => ({ ...prev, [task.chapterNumber]: content }));
+            currentChapters[task.chapterNumber] = content;
+            recordWritingDelta(task.chapterNumber, content, original);
+            done += 1;
+            lastChapter = task.chapterNumber;
+          } catch (error: any) {
+            pushToast(`第${task.chapterNumber}章修复失败：${error.message || error}，已继续后续章节`, 'error');
+          } finally {
+            setRepairFlow(prev => prev ? {
+              ...prev,
+              tasks: prev.tasks.map(item => item.chapterNumber === task.chapterNumber ? { ...item, done: true } : item),
+              currentIndex: task.chapterNumber,
+            } : prev);
+            patchTaskProgress({
+              label: `AI 逐步修复正文 ${done}/${selectedTasks.length}`,
+              progress: { current: done, total: selectedTasks.length },
+            });
+          }
+        }
+        if (lastChapter > 0) {
+          const tocItem = toc.find(t => t.chapterNumber === lastChapter);
+          if (tocItem) {
+            try {
+              const nextMemory = await updateNovelMemory(novelMemory, flow.bookInfoSnapshot, tocItem, currentChapters[lastChapter], settings);
+              setNovelMemory(nextMemory);
+            } catch (error) {
+              console.warn('修复后更新作品记忆失败', error);
+            }
+          }
+        }
+        setRepairFlow(prev => prev ? { ...prev, status: 'done', currentIndex: -1 } : prev);
+        pushToast(cancelTaskRef.current || stopBatchRef.current
+          ? `修复已停止：完成 ${done}/${selectedTasks.length} 章`
+          : `修复完成：完成 ${done}/${selectedTasks.length} 章`,
+          cancelTaskRef.current || stopBatchRef.current ? 'warn' : 'success');
+      },
+    });
+  };
+
+  const handleEntityAction = {
+    add: (card: Omit<EntityCard, 'id' | 'createdAt'>) => {
+      setEntityCards(prev => [...prev, { ...card, id: `entity_${Date.now()}`, createdAt: Date.now() }]);
+      pushToast('设定卡已添加', 'success');
+    },
+    update: (id: string, patch: Partial<EntityCard>) => setEntityCards(prev => prev.map(card => card.id === id ? { ...card, ...patch } : card)),
+    delete: (id: string) => setEntityCards(prev => prev.filter(card => card.id !== id)),
+    toggleEnabled: (id: string) => setEntityCards(prev => prev.map(card => card.id === id ? { ...card, enabled: !card.enabled } : card)),
+    togglePinned: (id: string) => setEntityCards(prev => prev.map(card => card.id === id ? { ...card, pinned: !card.pinned } : card)),
+  };
+
+  const handleExtractEntities = async () => {
+    if (!ensureSettingsReady()) return;
+    if (!bookInfo.outline && !bookInfo.worldbuilding) {
+      requireGate(false, '请先生成或填写大纲/世界观', 'book', '去书籍信息');
+      return;
+    }
+    await runTask({
+      kind: 'entities',
+      label: 'AI 提取设定卡',
+      run: async () => {
+        const cards = await extractEntityCards(bookInfo, settings);
+        setEntityCards(prev => {
+          const existingNames = new Set(prev.map(card => card.name));
+          const additions = cards
+            .filter(card => !existingNames.has(card.name))
+            .map(card => ({
+              id: `entity_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+              name: card.name,
+              type: card.type as EntityCard['type'],
+              description: card.description,
+              keywords: card.keywords,
+              pinned: false,
+              enabled: true,
+              createdAt: Date.now(),
+            }));
+          if (additions.length === 0) return prev;
+          return [...prev, ...additions];
+        });
+        pushToast(`已提取 ${cards.length} 张设定卡，重复卡已跳过`, 'success');
+      },
+    });
+  };
+
+  const handleExtractStyle = async (name: string, excerpt: string) => {
+    if (!ensureSettingsReady()) return;
+    if (!name.trim() || excerpt.replace(/\s/g, '').length < 200) {
+      pushToast('请填写风格卡名称，并提供至少 200 字范文', 'warn');
+      return;
+    }
+    await runTask({
+      kind: 'style',
+      label: '提取写作风格卡',
+      run: async () => {
+        const { traits } = await extractStyleCard(excerpt, settings);
+        const card: StyleCard = {
+          id: `style_${Date.now()}`,
+          name: name.trim(),
+          traits,
+          excerpt: excerpt.slice(0, 2000),
+          enabled: true,
+          createdAt: Date.now(),
+        };
+        setStyleCards(prev => [card, ...prev]);
+        pushToast('风格卡已提取，生成正文时会自动注入', 'success');
+      },
+    });
+  };
+
+  const savePromptPreset = (name: string) => {
+    const override = settings.promptOverride;
+    if (!override || (!override.globalPrefix.trim() && Object.values(override.taskExtra || {}).every(v => !v?.trim()))) {
+      pushToast('当前没有可保存的 Prompt 偏好', 'warn');
+      return;
+    }
+    setPromptPresets(prev => [{
+      id: `preset_${Date.now()}`,
+      name,
+      override: JSON.parse(JSON.stringify(override)),
+      createdAt: Date.now(),
+    }, ...prev]);
+    pushToast('Prompt 预设已保存', 'success');
+  };
+
+  const applyPromptPreset = (id: string) => {
+    const preset = promptPresets.find(item => item.id === id);
+    if (!preset) return;
+    setSettings(prev => ({ ...prev, promptOverride: JSON.parse(JSON.stringify(preset.override)) }));
+    pushToast(`已应用预设「${preset.name}」`, 'success');
   };
 
   const handleGenerateShortStoryOutline = async () => {
@@ -1715,7 +2129,7 @@ export default function App() {
           mode: 'rewrite',
           directive: noteText,
           existingContent: existing,
-          onChunk: (full) => setChapters(prev => ({ ...prev, [chapterNum]: full })),
+          onChunk: (full) => setChaptersMemory(prev => ({ ...prev, [chapterNum]: full })),
         });
         if (cancelTaskRef.current) throw new Error('已取消');
         setChapters(prev => ({ ...prev, [chapterNum]: content }));
@@ -1867,7 +2281,7 @@ export default function App() {
 
   const downloadShortStoryAsWord = async () => {
     const { Document, Paragraph, TextRun, HeadingLevel, AlignmentType, Packer } = await import('docx');
-    const paragraphs: Paragraph[] = [];
+    const paragraphs: import('docx').Paragraph[] = [];
     
     // 添加标题
     paragraphs.push(
@@ -1914,6 +2328,27 @@ export default function App() {
   };
 
   // Renderers
+  const renderEntities = () => (
+    <EntitiesPanel
+      entities={entityCards}
+      busy={isTaskBusy}
+      onAdd={handleEntityAction.add}
+      onUpdate={handleEntityAction.update}
+      onDelete={handleEntityAction.delete}
+      onToggleEnabled={handleEntityAction.toggleEnabled}
+      onTogglePinned={handleEntityAction.togglePinned}
+      onExtract={handleExtractEntities}
+    />
+  );
+
+  const renderStats = () => (
+    <StatsPanel
+      events={writingEvents}
+      chaptersCount={Object.keys(chapters).length}
+      target={bookInfo.targetChapterCount || 0}
+    />
+  );
+
   const renderSettings = () => (
     <SettingsPanel
       mode={mode}
@@ -1931,6 +2366,10 @@ export default function App() {
       onSaveProfile={saveProviderProfile}
       onProviderChange={handleProviderChange}
       onDetectModels={handleDetectModels}
+      promptPresets={promptPresets}
+      onSavePromptPreset={savePromptPreset}
+      onApplyPromptPreset={applyPromptPreset}
+      onDeletePromptPreset={(id) => setPromptPresets(prev => prev.filter(item => item.id !== id))}
     />
   );
 
@@ -2149,54 +2588,11 @@ export default function App() {
 
   const renderExamples = () => (
     <ExamplesPanel
-      mode={mode}
-      settings={settings}
-      isTaskBusy={isTaskBusy}
-      isGenerating={isGenerating}
-      pushToast={pushToast}
-      bookInfo={bookInfo}
-      setBookInfo={setBookInfo}
-      characters={characters}
-      setCharacters={setCharacters}
-      realmProgress={realmProgress}
-      setRealmProgress={setRealmProgress}
-      toc={toc}
-      setToc={setToc}
-      chapters={chapters}
-      shortStoryInfo={shortStoryInfo}
-      setShortStoryInfo={setShortStoryInfo}
-      shortStoryTitleOptions={shortStoryTitleOptions}
-      setShortStoryTitleOptions={setShortStoryTitleOptions}
-      tocCompact={tocCompact}
-      setTocCompact={setTocCompact}
-      tocMenuOpen={tocMenuOpen}
-      setTocMenuOpen={setTocMenuOpen}
-      activeChapterNum={activeChapterNum}
-      setActiveChapterNum={setActiveChapterNum}
-      setActiveTab={setActiveTab}
-      chapterQualityNotes={chapterQualityNotes}
-      batchFailedChapters={batchFailedChapters}
-      getRealmSystemLabel={getRealmSystemLabel}
-      themesRecommendRealms={themesRecommendRealms}
-      handleGenerateBookTitles={handleGenerateBookTitles}
-      handleGenerateBookInfo={handleGenerateBookInfo}
-      handleSelectTitle={handleSelectBookTitle}
-      handleBookThemesChange={handleBookThemesChange}
-      handleBookTitleInput={handleBookTitleInput}
-      handleBookPlanningFieldChange={handleBookPlanningFieldChange}
-      handleLengthChange={handleLengthChange}
-      handleGenerateCharacters={handleGenerateCharacters}
-      handleAddCharacter={handleAddCharacter}
-      handleDeleteCharacter={handleDeleteCharacter}
-      handleUpdateCharacter={handleUpdateCharacter}
-      handleGenerateRealms={handleGenerateRealms}
-      handleGenerateTOC={handleGenerateTOC}
-      handleGenerateSingleChapterOutline={handleGenerateSingleChapterOutline}
-      handleRegenerateChapterOutline={handleRegenerateChapterOutline}
-      handleDeleteChapterOutline={handleDeleteTOCItem}
-      handleGenerateShortStoryTitles={handleGenerateShortStoryTitles}
-      handleGenerateShortStoryOutline={handleGenerateShortStoryOutline}
-      handleGenerateChapter={handleGenerateChapter}
+      styleCards={styleCards}
+      busy={isTaskBusy}
+      onExtractStyle={handleExtractStyle}
+      onToggleStyle={(id) => setStyleCards(prev => prev.map(card => card.id === id ? { ...card, enabled: !card.enabled } : card))}
+      onDeleteStyle={(id) => setStyleCards(prev => prev.filter(card => card.id !== id))}
     />
   );
 
@@ -2213,6 +2609,7 @@ export default function App() {
       toc={toc}
       chapters={chapters}
       setChapters={setChapters}
+      onChapterEditorChange={handleChapterEditorChange}
       activeChapterNum={activeChapterNum}
       setActiveChapterNum={setActiveChapterNum}
       chapterQualityNotes={chapterQualityNotes}
@@ -2222,15 +2619,18 @@ export default function App() {
       isGenerating={isGenerating}
       isBatchGenerating={isBatchGenerating}
       generatingChapterNum={generatingChapterNum}
-      onGenerateShort={handleGenerateShortStoryContent}
-      onGenerateChapter={handleGenerateChapter}
-      onChapterAction={(n, action) => handleGenerateChapter(n, action)}
-      onDeleteChapter={handleDeleteChapter}
-      onBatchGenerate={handleBatchGenerateChapters}
-      onStopBatch={handleStopBatchGenerate}
-      onFillMissingChapters={() => handleBatchGenerateChapters({ onlyMissing: true, limit: 50 })}
-      onRewriteByQuality={handleRewriteChapterByQuality}
-      onPipelineToToc={handlePipelineToToc}
+      onGenerateShort={handlePanelGenerateShort}
+      onGenerateChapter={handlePanelGenerateChapter}
+      onChapterAction={handlePanelChapterAction}
+      onDeleteChapter={handlePanelDeleteChapter}
+      onBatchGenerate={handlePanelBatchGenerate}
+      onStopBatch={handlePanelStopBatch}
+      onFillMissingChapters={handlePanelFillMissing}
+      onRewriteByQuality={handlePanelRewriteByQuality}
+      onPipelineToToc={handlePanelPipelineToToc}
+      onGenerateDrafts={handlePanelGenerateDrafts}
+      chapterVersions={chapterVersions}
+      onRestoreVersion={handlePanelRestoreVersion}
       minWordCount={settings.minWordCount || 2000}
       targetChapterCount={bookInfo.targetChapterCount || 0}
     />
@@ -2239,6 +2639,10 @@ export default function App() {
 
   const handleReset = async () => {
     if (showResetConfirm) {
+      if (chaptersPersistTimerRef.current) {
+        clearTimeout(chaptersPersistTimerRef.current);
+        chaptersPersistTimerRef.current = null;
+      }
       try {
         await dualClearAll({ keepSettings: false });
       } catch (e) {
@@ -2268,6 +2672,11 @@ export default function App() {
       activeChapterNum,
       shortStoryInfo,
       shortStoryTitleOptions,
+      entityCards,
+      styleCards,
+      writingEvents,
+      promptPresets,
+      chapterVersions,
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -2305,6 +2714,11 @@ export default function App() {
         if (data.activeChapterNum !== undefined) setActiveChapterNum(data.activeChapterNum);
         if (data.shortStoryInfo) setShortStoryInfo(data.shortStoryInfo);
         if (data.shortStoryTitleOptions) setShortStoryTitleOptions(data.shortStoryTitleOptions);
+        if (data.entityCards) setEntityCards(data.entityCards);
+        if (data.styleCards) setStyleCards(data.styleCards);
+        if (data.writingEvents) setWritingEvents(data.writingEvents);
+        if (data.promptPresets) setPromptPresets(data.promptPresets);
+        if (data.chapterVersions) setChapterVersions(data.chapterVersions);
         pushToast('数据恢复成功！', 'success');
       } catch (err) {
         pushToast('恢复失败：文件格式错误', 'error');
@@ -2316,6 +2730,10 @@ export default function App() {
   const handleResetBookInfo = async () => {
     if (!confirm('确定要重开新书吗？将清空书籍设定、人物、目录、正文与短篇内容，但保留 API 设置。')) {
       return;
+    }
+    if (chaptersPersistTimerRef.current) {
+      clearTimeout(chaptersPersistTimerRef.current);
+      chaptersPersistTimerRef.current = null;
     }
     try {
       await dualClearAll({ keepSettings: true });
@@ -2356,21 +2774,96 @@ export default function App() {
     pushToast('已重开新书，API 设置保持不变', 'success');
   };
 
-  const navItems = mode === 'novel' 
+  const navItems = useMemo(() => mode === 'novel'
     ? [
         { id: 'settings', icon: SettingsIcon, label: '设置' },
         { id: 'book', icon: BookOpen, label: '书籍信息' },
         { id: 'characters', icon: Users, label: '人物关系' },
         ...(bookInfo.enableRealms !== false ? [{ id: 'realms', icon: Globe, label: getRealmSystemLabel(bookInfo.themes).title }] : []),
         { id: 'toc', icon: List, label: '大纲目录' },
+        { id: 'entities', icon: LibraryBig, label: '设定库' },
         { id: 'memory', icon: BookOpen, label: '作品记忆' },
     { id: 'chapters', icon: FileText, label: '章节内容' },
+        { id: 'stats', icon: ChartColumn, label: '统计' },
+        { id: 'examples', icon: Feather, label: '风格工坊' },
       ]
     : [
         { id: 'settings', icon: SettingsIcon, label: '设置' },
         { id: 'book', icon: Feather, label: '短篇设定' },
         { id: 'chapters', icon: FileText, label: '故事正文' },
-      ];
+      ], [mode, bookInfo.themes, bookInfo.enableRealms]);
+
+  // 稳定传给 memo 化布局/章节面板的回调，避免无关状态更新引发全树重渲染。
+  const handleActivateProviderProfile = useEventCallback((profile: ProviderProfile) => activateProviderProfile(profile));
+  const handleCancelTask = useEventCallback(() => requestCancelTask());
+  const handleRetryTask = useEventCallback(() => { void retryLastTask(); });
+  const handleClearTask = useEventCallback(() => clearTask());
+  const handleSidebarModeNovel = useEventCallback(() => {
+    setMode('novel');
+    setActiveTab('book');
+  });
+  const handleSidebarModeShort = useEventCallback(() => {
+    setMode('shortStory');
+    setActiveTab('book');
+  });
+  const handleSidebarNav = useEventCallback((id: string) => setActiveTab(id as Tab));
+  const handleToggleDownloadMenu = useEventCallback(() => setShowDownloadMenu(prev => !prev));
+  const handleSidebarDownloadTxt = useEventCallback(() => {
+    handleDownload('txt', { onlyWritten: true, withCover: true });
+    setShowDownloadMenu(false);
+  });
+  const handleSidebarDownloadDocx = useEventCallback(() => {
+    handleDownload('docx', { onlyWritten: true, withCover: true });
+    setShowDownloadMenu(false);
+  });
+  const handleSidebarDownloadTxtVolumes = useEventCallback(() => {
+    handleDownload('txt', { onlyWritten: true, withCover: true, volumeSize: 30 });
+    setShowDownloadMenu(false);
+  });
+  const handleSidebarDownloadDocxVolumes = useEventCallback(() => {
+    handleDownload('docx', { onlyWritten: true, withCover: true, volumeSize: 30 });
+    setShowDownloadMenu(false);
+  });
+  const handlePanelGenerateShort = useEventCallback((opts: { segmentIndex?: number; rewrite?: boolean; forceFinal?: boolean }) => {
+    handleGenerateShortStoryContent(opts);
+  });
+  const handlePanelGenerateChapter = useEventCallback((n: number, opts?: { mode?: ChapterGenOptions['mode']; directive?: string; stream?: boolean }) => {
+    void handleGenerateChapter(n, opts);
+  });
+  const handlePanelChapterAction = useEventCallback((n: number, opts: { mode?: ChapterGenOptions['mode']; directive?: string; stream?: boolean }) => {
+    void handleGenerateChapter(n, opts);
+  });
+  const handlePanelDeleteChapter = useEventCallback((n: number) => handleDeleteChapter(n));
+  const handlePanelBatchGenerate = useEventCallback((opts?: { onlyFailed?: boolean }) => handleBatchGenerateChapters(opts));
+  const handlePanelStopBatch = useEventCallback(() => handleStopBatchGenerate());
+  const handlePanelFillMissing = useEventCallback(() => handleBatchGenerateChapters({ onlyMissing: true, limit: 50 }));
+  const handlePanelRewriteByQuality = useEventCallback((n: number) => handleRewriteChapterByQuality(n));
+  const handlePanelPipelineToToc = useEventCallback(() => handlePipelineToToc());
+  const handlePanelGenerateDrafts = useEventCallback((n: number) => handleGenerateChapterDrafts(n));
+  const handlePanelRestoreVersion = useEventCallback((n: number, versionIndex: number) => handleRestoreChapterVersion(n, versionIndex));
+  const handleSidebarExportData = useEventCallback(() => handleExportData());
+  const handleSidebarImportData = useEventCallback(() => handleImportData());
+  const handleSidebarResetBook = useEventCallback(() => { void handleResetBookInfo(); });
+  const handleSidebarResetAll = useEventCallback(() => { void handleReset(); });
+  const sidebarProgress = useMemo(() => mode === 'novel'
+    ? {
+        doneSteps: novelProgress.doneSteps,
+        score: novelProgress.score,
+        nextHint: novelProgress.nextHint,
+        tocCount: novelProgress.tocCount,
+        written: novelProgress.written,
+        target: novelProgress.target,
+      }
+    : {
+        doneSteps: shortProgress.doneSteps,
+        score: shortProgress.score,
+        nextHint: shortProgress.nextHint,
+        segTotal: shortProgress.segTotal,
+        doneSegs: shortProgress.doneSegs,
+        words: shortProgress.words,
+        target: shortProgress.target,
+      }, [mode, novelProgress, shortProgress]);
+  const realmTitle = useMemo(() => getRealmSystemLabel(bookInfo.themes).title, [bookInfo.themes]);
 
   // 范文参考链接（去重）
   const EXAMPLE_LINKS = [
@@ -2381,90 +2874,88 @@ export default function App() {
     { url: 'https://fanqienovel.com/page/7603258880004475928', title: '范文示例 5' },
   ];
 
+  const wizardSteps: WizardStepView[] = [
+    { key: 'api', label: '配 Key', done: settingsReady(settings).ok, tab: 'settings' },
+    { key: 'theme', label: '题材', done: (bookInfo.themes || []).length > 0, tab: 'book' },
+    { key: 'title', label: '书名', done: !!bookInfo.title && !!bookInfo.isTitleSelected, tab: 'book' },
+    { key: 'outline', label: '大纲', done: !!bookInfo.outline.trim(), tab: 'book' },
+    { key: 'chapter1', label: '第一章', done: !!chapters[1]?.trim(), tab: 'chapters' },
+  ];
+
   return (
     <div className="flex h-screen text-[var(--ui-ink)] font-sans overflow-hidden bg-transparent">
       <AppSidebar
         mode={mode}
         activeTab={activeTab}
         navItems={navItems}
-        progress={
-          mode === 'novel'
-            ? {
-                doneSteps: novelProgress.doneSteps,
-                score: novelProgress.score,
-                nextHint: novelProgress.nextHint,
-                tocCount: novelProgress.tocCount,
-                written: novelProgress.written,
-                target: novelProgress.target,
-              }
-            : {
-                doneSteps: shortProgress.doneSteps,
-                score: shortProgress.score,
-                nextHint: shortProgress.nextHint,
-                segTotal: shortProgress.segTotal,
-                doneSegs: shortProgress.doneSegs,
-                words: shortProgress.words,
-                target: shortProgress.target,
-              }
-        }
-        chaptersCount={Object.keys(chapters).length}
+        progress={sidebarProgress}
+        chaptersCount={chapterCount}
         shortHasContent={!!shortStoryInfo.content}
         showDownloadMenu={showDownloadMenu}
         showResetConfirm={showResetConfirm}
-        onModeNovel={() => {
-          setMode('novel');
-          setActiveTab('book');
-        }}
-        onModeShort={() => {
-          setMode('shortStory');
-          setActiveTab('book');
-        }}
-        onNav={(id) => setActiveTab(id as Tab)}
-        onToggleDownloadMenu={() => setShowDownloadMenu(!showDownloadMenu)}
-        onDownloadTxt={() => {
-          handleDownload('txt', { onlyWritten: true, withCover: true });
-          setShowDownloadMenu(false);
-        }}
-        onDownloadDocx={() => {
-          handleDownload('docx', { onlyWritten: true, withCover: true });
-          setShowDownloadMenu(false);
-        }}
-        onDownloadTxtVolumes={() => {
-          handleDownload('txt', { onlyWritten: true, withCover: true, volumeSize: 30 });
-          setShowDownloadMenu(false);
-        }}
-        onDownloadDocxVolumes={() => {
-          handleDownload('docx', { onlyWritten: true, withCover: true, volumeSize: 30 });
-          setShowDownloadMenu(false);
-        }}
-        onExportData={handleExportData}
-        onImportData={handleImportData}
-        onResetBook={handleResetBookInfo}
-        onResetAll={handleReset}
+        onModeNovel={handleSidebarModeNovel}
+        onModeShort={handleSidebarModeShort}
+        onNav={handleSidebarNav}
+        onToggleDownloadMenu={handleToggleDownloadMenu}
+        onDownloadTxt={handleSidebarDownloadTxt}
+        onDownloadDocx={handleSidebarDownloadDocx}
+        onDownloadTxtVolumes={handleSidebarDownloadTxtVolumes}
+        onDownloadDocxVolumes={handleSidebarDownloadDocxVolumes}
+        onExportData={handleSidebarExportData}
+        onImportData={handleSidebarImportData}
+        onResetBook={handleSidebarResetBook}
+        onResetAll={handleSidebarResetAll}
       />
 
       <div className="ui-main-panel flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
         <AppHeader
           activeTab={activeTab}
           mode={mode}
-          realmTitle={getRealmSystemLabel(bookInfo.themes).title}
+          realmTitle={realmTitle}
           taskState={taskState}
           isBatchGenerating={isBatchGenerating}
           providerProfiles={providerProfiles}
           activeProfileId={activeProfileId}
           bookTitle={bookInfo.title}
           shortTitle={shortStoryInfo.title}
-          chapterWritten={Object.keys(chapters).length}
+          chapterWritten={chapterCount}
           chapterTarget={bookInfo.targetChapterCount || 0}
-          onActivateProfile={activateProviderProfile}
-          onCancelTask={requestCancelTask}
-          onRetryTask={() => {
-            void retryLastTask();
-          }}
-          onClearTask={clearTask}
+          onActivateProfile={handleActivateProviderProfile}
+          onCancelTask={handleCancelTask}
+          onRetryTask={handleRetryTask}
+          onClearTask={handleClearTask}
         />
 
         <main className={`flex-1 min-h-0 ${activeTab === 'chapters' ? 'p-0 overflow-hidden flex flex-col' : 'overflow-y-auto p-5 md:p-8'}`}>
+          {mode === 'novel' && (
+            <WizardBanner
+              steps={wizardSteps}
+              visible={!wizardDismissed && wizardSteps.some(step => !step.done)}
+              onGo={(tab) => setActiveTab(tab as Tab)}
+              onDismiss={() => setWizardDismissed(true)}
+            />
+          )}
+          {repairFlow && (
+            <RepairFlowBanner
+              state={repairFlow}
+              busy={isTaskBusy}
+              onToggle={(chapterNumber) => setRepairFlow(prev => prev ? {
+                ...prev,
+                tasks: prev.tasks.map(task => task.chapterNumber === chapterNumber ? { ...task, selected: !task.selected } : task),
+              } : prev)}
+              onSelectAll={(selected) => setRepairFlow(prev => prev ? {
+                ...prev,
+                tasks: prev.tasks.map(task => ({ ...task, selected })),
+              } : prev)}
+              onRun={() => { void runRepairs(); }}
+              onStop={() => { stopBatchRef.current = true; requestCancelTask(); }}
+              onDismiss={() => setRepairFlow(null)}
+              onGoChapter={(chapterNumber) => {
+                setActiveChapterNum(chapterNumber);
+                setActiveTab('chapters');
+              }}
+            />
+          )}
           {activeTab !== 'settings' && !settingsReady(settings).ok && (
             <div className="mx-5 md:mx-8 mt-4 mb-0 rounded-xl border border-amber-200 bg-amber-50/90 px-3 py-2 text-sm text-amber-900 flex flex-wrap items-center justify-between gap-2">
               <span>设置未就绪：{settingsReady(settings).reason || '请完善 API 配置'}（开始生成前请先配置）</span>
@@ -2478,11 +2969,13 @@ export default function App() {
           {activeTab === 'characters' && renderCharacters()}
           {activeTab === 'realms' && renderRealms()}
           {activeTab === 'toc' && renderTOC()}
+          {activeTab === 'entities' && mode === 'novel' && renderEntities()}
           {activeTab === 'memory' && mode === 'novel' && (
             <MemoryPanel novelMemory={novelMemory} setNovelMemory={setNovelMemory} editable={memoryEditable} setEditable={setMemoryEditable} />
           )}
           {activeTab === 'chapters' && renderChapters()}
           {activeTab === 'examples' && renderExamples()}
+          {activeTab === 'stats' && mode === 'novel' && renderStats()}
         </main>
       </div>
 
@@ -2490,6 +2983,16 @@ export default function App() {
         state={downstreamConfirm}
         onCancel={() => setDownstreamConfirm(null)}
         onConfirm={resolveDownstreamConfirm}
+      />
+      <MultiDraftModal
+        open={multiDraftOpen}
+        chapterNum={multiDraftChapterNum}
+        drafts={chapterDrafts}
+        onClose={() => {
+          setMultiDraftOpen(false);
+          setChapterDrafts([]);
+        }}
+        onPick={handlePickChapterDraft}
       />
       <ToastStack
         toasts={toasts}

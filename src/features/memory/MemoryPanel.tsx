@@ -1,11 +1,12 @@
 import type { NovelMemory } from '../../types';
+import type { ReactNode } from 'react';
 
 function Section({
   title,
   children,
 }: {
   title: string;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   return (
     <section className="ui-memory-card">

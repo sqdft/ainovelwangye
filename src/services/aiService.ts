@@ -1,5 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
-import { Settings, BookInfo, Character, TOCItem, ShortStoryInfo, StorySegment, Realm, SubRealm, RealmProgress, NovelMemory } from "../types";
+import { Settings, BookInfo, Character, TOCItem, ShortStoryInfo, StorySegment, Realm, SubRealm, RealmProgress, NovelMemory, PromptTaskKey } from "../types";
 import { getThemePrompt } from "../config/themes";
 import { normalizeBaseUrl, proxyFetch } from '../lib/devProxy';
 
@@ -11,6 +11,10 @@ export type ChapterGenOptions = {
   existingContent?: string;
   signal?: AbortSignal;
   onChunk?: (fullText: string) => void;
+  entityContext?: string; // 本章相关设定卡（由 App 按相关性挑选）
+  styleDirective?: string; // 启用的风格卡特征
+  previousChapterNumbers?: number[]; // 与 previousChapters 一一对应的章节号
+  skipMemoryUpdate?: boolean; // 多稿等场景先生成正文，选定后再统一更新记忆
 };
 
 
@@ -57,6 +61,18 @@ function extractJSON(text: string): any {
 function ensureArray<T = any>(value: any, fieldName: string): T[] {
   if (Array.isArray(value)) return value;
   throw new Error(`AI 返回的数据缺少有效的 ${fieldName} 数组，请重试。`);
+}
+
+// Prompt 工坊：把用户创作偏好拼接到任务 Prompt 尾部
+function promptOverrideSuffix(settings: Settings, task: PromptTaskKey): string {
+  const po = settings?.promptOverride;
+  if (!po) return '';
+  const parts: string[] = [];
+  if (po.globalPrefix?.trim()) parts.push(po.globalPrefix.trim());
+  const extra = po.taskExtra?.[task];
+  if (extra?.trim()) parts.push(extra.trim());
+  if (parts.length === 0) return '';
+  return `\n\n【创作偏好（用户设定，请优先遵守）】\n${parts.join('\n')}`;
 }
 
 function cleanText(value: any): string {
@@ -341,6 +357,17 @@ async function callOpenAIWithKey(
       const decoder = new TextDecoder('utf-8');
       let full = '';
       let buffer = '';
+      const EMIT_INTERVAL_MS = 100;
+      let lastEmitAt = 0;
+      let emittedText = '';
+      const emitChunk = (text: string, force = false) => {
+        if (!opts?.onChunk || !text || text === emittedText) return;
+        const now = Date.now();
+        if (!force && now - lastEmitAt < EMIT_INTERVAL_MS) return;
+        lastEmitAt = now;
+        emittedText = text;
+        opts.onChunk(text);
+      };
       while (true) {
         if (opts.signal?.aborted) {
           try { await reader.cancel(); } catch { /* ignore */ }
@@ -361,16 +388,17 @@ async function callOpenAIWithKey(
             const delta = json.choices?.[0]?.delta?.content;
             if (typeof delta === 'string' && delta) {
               full += delta;
-              opts.onChunk?.(full);
+              emitChunk(full);
             }
             const msg = json.choices?.[0]?.message?.content;
             if (typeof msg === 'string' && msg && !delta) {
               full = msg;
-              opts.onChunk?.(full);
+              emitChunk(full, true);
             }
           } catch { /* skip */ }
         }
       }
+      emitChunk(full, true);
       return { success: true, content: full };
     }
 
@@ -585,7 +613,7 @@ export async function generateBookInfo(currentBookInfo: BookInfo, settings: Sett
   if (currentBookInfo.worldbuilding) existingInfo += `\n已有世界观：${currentBookInfo.worldbuilding}`;
 
   const themePrompts = currentBookInfo.themes.map(theme => getThemePrompt(theme, 'novel')).join('\n');
-  const prompt = `请帮我构思或完善一本小说设定。
+  let prompt = `请帮我构思或完善一本小说设定。
 【基本设定】
 书名：${currentBookInfo.title}
 ${themePrompts}
@@ -607,12 +635,11 @@ ${themePrompts}
 - outline 和 worldbuilding 必须是不同的内容，不要重复
 - 不要输出其他任何解释性文字，只返回 JSON 对象`;
 
+  prompt += promptOverrideSuffix(settings, 'bookInfo');
   const responseText = await callAI(prompt, settings, true);
   const data = extractJSON(responseText);
-  
-  // 调试日志
-  console.log('AI 返回的数据:', data);
-  
+
+  // 确保返回的数据包含所有必要字段
   // 确保返回的数据包含所有必要字段
   const result = {
     title: data.title || currentBookInfo.title,
@@ -630,7 +657,7 @@ ${themePrompts}
 
 export async function generateCharacters(bookInfo: BookInfo, settings: Settings): Promise<Character[]> {
   const themePrompts = bookInfo.themes.map(theme => getThemePrompt(theme, 'novel')).join('\n');
-  const prompt = `根据以下小说设定，生成 8-15 个主要人物及其关系。
+  let prompt = `根据以下小说设定，生成 8-15 个主要人物及其关系。
 【书籍信息】
 书名：${bookInfo.title}
 ${themePrompts}
@@ -649,6 +676,7 @@ ${themePrompts}
 3. 人物之间应有复杂的关系网络，包括亲情、友情、爱情、师徒、恩怨、竞争等。
 不要输出其他任何解释性文字。`;
 
+  prompt += promptOverrideSuffix(settings, 'characters');
   const responseText = await callAI(prompt, settings, true);
   const data = extractJSON(responseText);
   return validateCharacters(data);
@@ -794,7 +822,7 @@ ${pacingInstruction}
     }
 
     try {
-      const responseText = await callAI(attemptPrompt, settings, true);
+      const responseText = await callAI(attemptPrompt + promptOverrideSuffix(settings, 'toc'), settings, true);
       const data = extractJSON(responseText);
       const batch = validateTOC(
         data,
@@ -865,6 +893,13 @@ export async function generateChapterContent(
   
   // 计算当前进度百分比
   const progressPercent = Math.round((tocItem.chapterNumber / bookInfo.targetChapterCount) * 100);
+
+  const styleBlock = genOpts?.styleDirective?.trim()
+    ? `\n【写作风格（用户指定）】\n${genOpts.styleDirective.trim()}\n`
+    : '';
+  const entityBlock = genOpts?.entityContext?.trim()
+    ? `\n【本章相关设定卡】\n${genOpts.entityContext.trim()}\n设定卡与本章剧情相关时自然体现，不要生硬罗列。\n`
+    : '';
   
   let pacingContext = '';
   if (isFinalChapter) {
@@ -893,6 +928,7 @@ ${pacingContext}
 
 【人物设定】
 ${charsStr}
+${styleBlock}${entityBlock}
 ${novelMemory ? `\n【全书记忆】\n故事进展：${novelMemory.storySoFar || '暂无'}\n人物状态：${novelMemory.characterStates || '暂无'}\n未回收伏笔：${novelMemory.openThreads.join('；') || '暂无'}\n已解决线索：${novelMemory.resolvedThreads.join('；') || '暂无'}\n重要物品/设定：${novelMemory.importantItems.join('；') || '暂无'}\n请严格延续这些状态，不要让角色关系、伏笔、物品归属和已发生事件前后矛盾。\n` : ''}
 ${realmProgress && realmProgress.realms.length > 0 ? (() => {
   // 根据chapterRealmMap自动推算当前章节主角所在境界（大境界+小境界）
@@ -953,13 +989,28 @@ ${tocItem.summary}
 `;
 
   if (previousChapters.length > 0) {
-    prompt += `\n【前文回顾】\n为了保持长线剧情连贯，以下是前几章的剧情摘要：\n`;
-    
-    // 获取最近3章的摘要
-    const recentTocItems = toc.filter(t => t.chapterNumber < tocItem.chapterNumber).slice(-3);
-    recentTocItems.forEach(t => {
-      prompt += `第${t.chapterNumber}章摘要：${t.summary}\n`;
-    });
+    // 分级上下文：近章全文保证衔接，中程摘要维持长线，全书记忆兜底设定
+    const nums = genOpts?.previousChapterNumbers
+      && genOpts.previousChapterNumbers.length === previousChapters.length
+      ? genOpts.previousChapterNumbers
+      : previousChapters.map((_, i) => tocItem.chapterNumber - previousChapters.length + i);
+    const nearCount = Math.min(3, previousChapters.length);
+    const nearStart = previousChapters.length - nearCount;
+    const nearParts: string[] = [];
+    for (let i = nearStart; i < previousChapters.length; i++) {
+      const raw = previousChapters[i] || '';
+      const clipped = raw.length > 1800
+        ? `${raw.slice(0, 300)}\n……（中略）……\n${raw.slice(-1400)}`
+        : raw;
+      nearParts.push(`--- 第${nums[i]}章全文 ---\n${clipped}`);
+    }
+    prompt += `\n【上文·近章全文】以下是最多3章近期正文，请保证无缝衔接：\n${nearParts.join('\n')}\n`;
+
+    const recentWindow = toc.filter(t => t.chapterNumber < tocItem.chapterNumber).slice(-12);
+    const midToc = recentWindow.slice(0, Math.max(0, recentWindow.length - 3));
+    if (midToc.length > 0) {
+      prompt += `\n【上文·中程摘要】\n${midToc.map(t => `第${t.chapterNumber}章：${t.summary}`).join('\n')}\n`;
+    }
 
     prompt += `\n为了保证章节之间的自然衔接，以下是上一章结尾的部分正文，请**直接顺着上一章的结尾继续往下写**，不要重复上一章的内容：\n`;
     const lastChapter = previousChapters[previousChapters.length - 1];
@@ -982,6 +1033,8 @@ ${tocItem.summary}
   if (genOpts?.directive && mode !== 'rewrite') {
     prompt += `\n\n【额外要求】${genOpts.directive}\n`;
   }
+
+  prompt += promptOverrideSuffix(settings, 'chapter');
 
   const responseText = await callAI(prompt, settings, false, {
     signal: genOpts?.signal,
@@ -1169,8 +1222,137 @@ ${isFinalBatch ? '\n【强制结尾要求】这是最后一段生成！必须：
     prompt += `\n【前文回顾】\n以下是你已经写出的前文最后部分（全文约${Math.round(totalLength / 2)}字，请勿重复已写内容），请紧接其后继续撰写新内容：\n\n${recentContent}\n\n【重要提醒】你正在续写第${Math.floor(totalLength / 1500) + 1}部分内容。绝对不要重复上文已出现的对话、场景描写或情节，必须推进新的剧情发展。`;
   }
 
+  prompt += promptOverrideSuffix(settings, 'shortContent');
+
   const responseText = await callAI(prompt, settings, false);
   return responseText.trim();
+}
+
+// ===== 风格工坊 / 设定库 / 修复流 =====
+
+export async function extractStyleCard(
+  excerpt: string,
+  settings: Settings
+): Promise<{ traits: string }> {
+  const prompt = `你是资深网文编辑。分析以下范文的写作风格，输出一张"风格特征卡"，供另一个 AI 模仿写作时使用。
+
+【范文样本】
+${excerpt.slice(0, 6000)}
+
+请严格返回 JSON 对象：
+{
+  "traits": "用150字以内概括：叙事视角、句式节奏、对话密度、情绪渲染方式、爽点/钩子手法、用词偏好。要具体可执行，不要空话"
+}
+不要输出其他任何解释性文字。`;
+  const responseText = await callAI(prompt, settings, true);
+  const data = extractJSON(responseText);
+  const traits = cleanText(data.traits);
+  if (!traits) throw new Error('AI 未返回有效的风格特征，请重试或更换范文。');
+  return { traits: traits.slice(0, 600) };
+}
+
+export async function extractEntityCards(
+  bookInfo: BookInfo,
+  settings: Settings
+): Promise<Array<{ name: string; type: string; description: string; keywords: string[] }>> {
+  const prompt = `你是小说设定整理师。根据以下书籍信息，提取需要跨章保持一致的实体设定卡。
+
+【书籍信息】
+书名：${bookInfo.title}
+大纲：${bookInfo.outline}
+世界观：${bookInfo.worldbuilding}
+
+要求：
+1. 提取地点、物品/法宝、势力/组织、伏笔/约定等（不要提取已单独管理的人物）。
+2. 每张卡：name（名称）、type（只能是 location/item/faction/thread 之一）、description（60字内，含当前状态）、keywords（2-5个触发词，出现在章节摘要中才注入）。
+3. 最多 12 张，按重要性排序。
+
+请严格返回 JSON 对象：{"cards":[...]}。不要输出其他文字。`;
+  const responseText = await callAI(prompt + promptOverrideSuffix(settings, 'bookInfo'), settings, true);
+  const data = extractJSON(responseText);
+  const raw = ensureArray(data.cards, 'cards');
+  const validTypes = ['location', 'item', 'faction', 'thread'];
+  return raw
+    .map((c: any) => ({
+      name: cleanText(c.name).slice(0, 30),
+      type: validTypes.includes(c.type) ? c.type : 'item',
+      description: cleanText(c.description).slice(0, 200),
+      keywords: Array.isArray(c.keywords) ? c.keywords.map(cleanText).filter(Boolean).slice(0, 5) : [],
+    }))
+    .filter(c => c.name);
+}
+
+export async function analyzeOutlineRepair(
+  newBookInfo: BookInfo,
+  toc: TOCItem[],
+  field: 'outline' | 'worldbuilding',
+  settings: Settings
+): Promise<Array<{ chapterNumber: number; reason: string }>> {
+  const tocStr = toc
+    .map(t => `第${t.chapterNumber}章 ${t.title}：${t.summary}`)
+    .join('\n')
+    .slice(0, 6000);
+  const fieldName = field === 'outline' ? '故事大纲' : '世界观设定';
+  const prompt = `你是连载小说连续性主编。作者刚修改了${fieldName}，需要判断哪些已生成章节与最新设定冲突、正文必须修改。
+
+【最新${fieldName}】
+${field === 'outline' ? newBookInfo.outline : newBookInfo.worldbuilding}
+（另一项设定供参考——大纲：${newBookInfo.outline.slice(0, 500)}；世界观：${newBookInfo.worldbuilding.slice(0, 500)}）
+
+【已有章节目录】
+${tocStr || '（暂无目录）'}
+
+要求：
+1. 只列与最新${fieldName}明确冲突、或必须调整才能衔接后续剧情的章节。
+2. 每章给一句可执行的修改原因（reason），如"主角身份已改为孤儿，需删去世家子弟描写"。
+3. 最多 12 章，按章节号升序；没有冲突就返回空数组。
+
+请严格返回 JSON 对象：{"repairs":[{"chapterNumber":1,"reason":"..."}]}。不要输出其他文字。`;
+  const responseText = await callAI(prompt, settings, true);
+  const data = extractJSON(responseText);
+  const raw = ensureArray(data.repairs, 'repairs');
+  return raw
+    .map((r: any) => ({
+      chapterNumber: Number(r.chapterNumber),
+      reason: cleanText(r.reason).slice(0, 200),
+    }))
+    .filter(r => r.chapterNumber >= 1 && r.reason)
+    .sort((a, b) => a.chapterNumber - b.chapterNumber)
+    .slice(0, 12);
+}
+
+export async function repairChapterContent(
+  bookInfo: BookInfo,
+  tocItem: TOCItem,
+  chapterContent: string,
+  reason: string,
+  settings: Settings
+): Promise<string> {
+  const prompt = `你是网文修订作者。作者修改了书籍设定，需要你修订本章正文，使它与最新设定一致。
+
+【最新书籍设定】
+书名：${bookInfo.title}
+大纲：${bookInfo.outline}
+世界观：${bookInfo.worldbuilding}
+
+【本章信息】
+第${tocItem.chapterNumber}章 ${tocItem.title}
+本章摘要：${tocItem.summary}
+
+【需要修复的问题】
+${reason}
+
+【修订规则】
+1. 只修复与上述问题相关的部分，其余剧情、对话、细节尽量原样保留。
+2. 修复后正文必须能无缝衔接前后章节，字数与原文相当。
+3. 直接输出修订后的完整本章正文，不要标题、解释或对比说明。
+
+【本章原文】
+${chapterContent.slice(0, 8000)}`;
+  const responseText = await callAI(prompt + promptOverrideSuffix(settings, 'chapter'), settings, false);
+  const result = responseText.trim();
+  if (!result) throw new Error('AI 返回的修复正文为空，请重试。');
+  return result;
 }
 
 export const __test__ = {

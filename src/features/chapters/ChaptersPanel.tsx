@@ -6,16 +6,20 @@ import {
   Copy,
   Feather,
   FileText,
+  History,
   List,
   Loader2,
   Pencil,
   Play,
   RefreshCw,
+  Rows3,
   Save,
   X,
   Wand2,
 } from 'lucide-react';
-import type { ShortStoryInfo, TOCItem } from '../../types';
+import type { ChapterGenMode } from '../../services/aiService';
+import { memo } from 'react';
+import type { ChapterVersionMap, ShortStoryInfo, TOCItem } from '../../types';
 import { SHORT_STORY_THEME_NAMES } from '../../config/themes';
 
 export type ChaptersPanelProps = {
@@ -32,6 +36,7 @@ export type ChaptersPanelProps = {
   toc: TOCItem[];
   chapters: Record<number, string>;
   setChapters: (v: Record<number, string> | ((p: Record<number, string>) => Record<number, string>)) => void;
+  onChapterEditorChange?: (chapterNum: number, value: string) => void;
   activeChapterNum: number | null;
   setActiveChapterNum: (n: number | null) => void;
   chapterQualityNotes: Record<number, string[]>;
@@ -47,18 +52,21 @@ export type ChaptersPanelProps = {
   // actions
   onGenerateShort: (opts: { segmentIndex?: number; rewrite?: boolean; forceFinal?: boolean }) => void;
   onGenerateChapter: (n: number, opts?: { mode?: string; directive?: string; stream?: boolean }) => void;
-  onChapterAction?: (n: number, opts: { mode?: string; directive?: string; stream?: boolean }) => void;
+  onChapterAction?: (n: number, opts: { mode?: ChapterGenMode; directive?: string; stream?: boolean }) => void;
   onDeleteChapter: (n: number) => void;
   onBatchGenerate: (opts?: { onlyFailed?: boolean }) => void;
   onStopBatch: () => void;
   onFillMissingChapters?: () => void;
   onRewriteByQuality?: (n: number) => void;
   onPipelineToToc?: () => void;
+  onGenerateDrafts?: (n: number) => void;
+  chapterVersions?: ChapterVersionMap;
+  onRestoreVersion?: (n: number, versionIndex: number) => void;
   minWordCount?: number;
   targetChapterCount?: number;
 };
 
-export function ChaptersPanel(props: ChaptersPanelProps) {
+export const ChaptersPanel = memo(function ChaptersPanel(props: ChaptersPanelProps) {
   const {
     mode,
     shortStoryInfo,
@@ -71,6 +79,7 @@ export function ChaptersPanel(props: ChaptersPanelProps) {
     toc,
     chapters,
     setChapters,
+    onChapterEditorChange,
     activeChapterNum,
     setActiveChapterNum,
     chapterQualityNotes,
@@ -89,6 +98,9 @@ export function ChaptersPanel(props: ChaptersPanelProps) {
     onFillMissingChapters,
     onRewriteByQuality,
     onPipelineToToc,
+    onGenerateDrafts,
+    chapterVersions,
+    onRestoreVersion,
     minWordCount = 2000,
     targetChapterCount = 0,
   } = props;
@@ -634,6 +646,18 @@ export function ChaptersPanel(props: ChaptersPanelProps) {
                       按质检重写
                     </button>
                   )}
+                  {onGenerateDrafts && (
+                    <button
+                      type="button"
+                      onClick={() => onGenerateDrafts(activeChapterNum)}
+                      disabled={isTaskBusy}
+                      className="ui-btn-secondary text-xs disabled:opacity-50"
+                      title="同章生成冲突、情绪、细节三个版本，再自主择优"
+                    >
+                      <Rows3 className="w-4 h-4" />
+                      生成多稿
+                    </button>
+                  )}
                 </div>
               </div>
               
@@ -688,6 +712,35 @@ export function ChaptersPanel(props: ChaptersPanelProps) {
                   </button>
                 </div>
               )}
+              {activeChapterNum != null && !!chapterVersions?.[activeChapterNum]?.length && onRestoreVersion && (
+                <div className="mx-3 mt-2 rounded-xl border border-[var(--ui-line)] bg-white/82 px-3 py-2 text-xs shrink-0">
+                  <div className="flex items-center gap-1.5 font-semibold text-[var(--ui-ink)] mb-1.5">
+                    <History className="w-3.5 h-3.5" />
+                    历史版本（{chapterVersions[activeChapterNum].length}）
+                  </div>
+                  <div className="max-h-32 overflow-y-auto space-y-1.5 pr-1">
+                    {chapterVersions[activeChapterNum].map((version, index) => (
+                      <div key={`${version.ts}-${index}`} className="flex items-center justify-between gap-2 rounded-lg bg-black/[0.03] px-2 py-1.5">
+                        <div className="min-w-0">
+                          <p className="font-medium text-[var(--ui-ink)] truncate">{version.label}</p>
+                          <p className="text-[10px] text-[var(--ui-muted)]">
+                            {new Date(version.ts).toLocaleString()} · {version.words.toLocaleString()} 字
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          className="ui-btn-secondary text-[11px] shrink-0 disabled:opacity-50"
+                          disabled={isTaskBusy}
+                          onClick={() => onRestoreVersion(activeChapterNum, index)}
+                        >
+                          恢复
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-[var(--ui-muted)] mt-1">恢复前会把当前正文另存为新版本，最多保留 20 条。</p>
+                </div>
+              )}
               {batchFailedChapters.length > 0 && !isBatchGenerating && (
                 <div className="mx-3 mt-2 rounded-xl border border-red-200 bg-red-50/90 px-3 py-2 text-xs text-red-900 shrink-0">
                   <span className="font-semibold">批量失败章节：</span>
@@ -715,7 +768,9 @@ export function ChaptersPanel(props: ChaptersPanelProps) {
                       )}
                       <textarea
                         value={chapters[activeChapterNum]}
-                        onChange={(e) => setChapters(prev => ({ ...prev, [activeChapterNum]: e.target.value }))}
+                        onChange={(e) => onChapterEditorChange
+                          ? onChapterEditorChange(activeChapterNum, e.target.value)
+                          : setChapters(prev => ({ ...prev, [activeChapterNum]: e.target.value }))}
                         className="ui-input ui-chapter-editor"
                       />
                     </div>
@@ -749,4 +804,4 @@ export function ChaptersPanel(props: ChaptersPanelProps) {
         </div>
       </div>
     );
-}
+});

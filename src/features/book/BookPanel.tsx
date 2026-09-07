@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import { ThemeSelector } from '../../components/ThemeSelector';
 import { LENGTHS } from '../../config/lengths';
+import type { ShortStoryInfo } from '../../types';
 
 export type BookPanelProps = {
   // 宽兼容：App 仍透传多字段；逐步收紧时优先用到的字段
@@ -18,7 +19,7 @@ export type BookPanelProps = {
   setShortStoryInfo?: (v: any) => void;
   shortStoryTitleOptions?: string[];
   setShortStoryTitleOptions?: (v: any) => void;
-  getRealmSystemLabel?: (themes: string[]) => { title: string };
+  getRealmSystemLabel?: (themes: string[]) => { title: string; hint?: string; generateLabel?: string };
   themesRecommendRealms?: (themes: string[]) => string;
   handleGenerateBookTitles?: () => void;
   handleGenerateBookInfo?: () => void;

@@ -1,8 +1,9 @@
+import { memo } from 'react';
 import { Loader2 } from 'lucide-react';
 import type { ProviderProfile } from '../../types';
 import type { TaskState } from '../../orchestration';
 
-export function AppHeader({
+export const AppHeader = memo(function AppHeader({
   title,
   realmTitle,
   activeTab,
@@ -143,4 +144,4 @@ export function AppHeader({
       )}
     </header>
   );
-}
+});

@@ -7,6 +7,7 @@ import {
   Upload,
   type LucideIcon,
 } from 'lucide-react';
+import { memo } from 'react';
 
 export type NavItem = { id: string; icon: LucideIcon; label: string };
 
@@ -22,7 +23,7 @@ export type ProgressView = {
   words?: number;
 };
 
-export function AppSidebar({
+export const AppSidebar = memo(function AppSidebar({
   mode,
   activeTab,
   navItems,
@@ -216,4 +217,4 @@ export function AppSidebar({
       </div>
     </aside>
   );
-}
+});
